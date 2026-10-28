@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Additional environment files
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
