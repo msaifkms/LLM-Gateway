@@ -1,11 +1,15 @@
 services:
   gateway:
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
     build: .
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
       - postgres
       - redis
+    
 
   postgres:
     image: postgres:16
