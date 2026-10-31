@@ -75,3 +75,14 @@ class ProviderBadRequestError(ProviderError):
     fallback = False
     status_code = 400
     default_detail = "Upstream provider rejected the request"
+
+
+class CircuitOpenError(ProviderError):
+    """Raised by the circuit breaker itself, without calling the provider.
+
+    Not retryable (retrying an open circuit is pointless) but the router
+    should fall back to the next provider.
+    """
+
+    status_code = 503
+    default_detail = "Upstream provider temporarily unavailable"

@@ -1,6 +1,7 @@
 import pytest
 
 from app.resilience.errors import (
+    CircuitOpenError,
     ProviderAuthError,
     ProviderBadRequestError,
     ProviderConfigError,
@@ -24,6 +25,7 @@ from app.resilience.errors import (
         (ProviderConfigError, False, True, 503),
         (ProviderResponseError, False, True, 502),
         (ProviderBadRequestError, False, False, 400),
+        (CircuitOpenError, False, True, 503),
     ],
 )
 def test_error_policy(
