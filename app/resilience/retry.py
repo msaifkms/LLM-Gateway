@@ -5,11 +5,8 @@ import random
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TypeVar
 
 from app.resilience.errors import ProviderError
-
-T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -48,7 +45,7 @@ def compute_delay(
     return delay
 
 
-async def call_with_retry(
+async def call_with_retry[T](
     func: Callable[[], Awaitable[T]],
     policy: RetryPolicy,
     *,
