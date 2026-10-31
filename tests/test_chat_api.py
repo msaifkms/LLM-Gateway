@@ -1,11 +1,16 @@
+import random
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.chat import providers
+from app.api.chat import get_router, providers
+from app.core.router import Router
+from app.core.routes import DEFAULT_ROUTES
 from app.main import app
+from app.providers.mock import MockProvider
 from app.resilience.errors import (
+    CircuitOpenError,
     ProviderAuthError,
     ProviderBadRequestError,
     ProviderConfigError,
@@ -22,6 +27,43 @@ client = TestClient(app)
 HELLO = {"role": "user", "content": "Hello!"}
 
 
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, delay: float) -> None:
+        self.now += delay
+
+
+def use_router(monkeypatch: pytest.MonkeyPatch, overrides: dict[str, object]) -> None:
+    """Swap in a fresh router (own breakers, instant sleeps) for one test."""
+    clock = FakeClock()
+    router = Router(
+        DEFAULT_ROUTES,
+        {**providers, **overrides},
+        sleep=clock.sleep,
+        clock=clock,
+        rng=random.Random(0),
+    )
+    monkeypatch.setitem(app.dependency_overrides, get_router, lambda: router)
+
+
+def failing(error: Exception) -> AsyncMock:
+    mock = AsyncMock()
+    mock.complete.side_effect = error
+    return mock
+
+
+def post(model: str) -> object:
+    return client.post(
+        "/v1/chat/completions",
+        json={"model": model, "messages": [HELLO]},
+    )
+
+
 def test_chat_completion_success() -> None:
     response = client.post(
         "/v1/chat/completions",
@@ -29,6 +71,7 @@ def test_chat_completion_success() -> None:
     )
 
     assert response.status_code == 200
+    assert response.headers["x-provider"] == "mock-1"
 
     data = response.json()
 
@@ -66,14 +109,13 @@ def test_invalid_request() -> None:
         (ProviderConfigError("k", provider="openai"), 503),
         (ProviderResponseError("m", provider="openai"), 502),
         (ProviderBadRequestError("b", provider="openai"), 400),
+        (CircuitOpenError("o", provider="openai"), 503),
     ],
 )
 def test_provider_errors_map_to_http_status(
     monkeypatch: pytest.MonkeyPatch, error: ProviderError, status: int
 ) -> None:
-    mock = AsyncMock()
-    mock.complete.side_effect = error
-    monkeypatch.setitem(providers, "openai-default", mock)
+    use_router(monkeypatch, {"openai-default": failing(error)})
 
     response = client.post(
         "/v1/chat/completions",
@@ -87,11 +129,8 @@ def test_provider_errors_map_to_http_status(
 def test_rate_limit_sets_retry_after_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    mock = AsyncMock()
-    mock.complete.side_effect = ProviderRateLimitError(
-        "limited", provider="openai", retry_after=2.5
-    )
-    monkeypatch.setitem(providers, "openai-default", mock)
+    error = ProviderRateLimitError("limited", provider="openai", retry_after=2.5)
+    use_router(monkeypatch, {"openai-default": failing(error)})
 
     response = client.post(
         "/v1/chat/completions",
@@ -100,3 +139,43 @@ def test_rate_limit_sets_retry_after_header(
 
     assert response.status_code == 503
     assert response.headers["retry-after"] == "3"
+
+
+def test_chat_default_falls_back_to_second_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    use_router(
+        monkeypatch,
+        {
+            "anthropic-default": failing(ProviderServerError("down", provider="a")),
+            "openai-default": MockProvider("from openai"),
+        },
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "chat-default", "messages": [HELLO]},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-provider"] == "openai-default"
+    assert response.json()["choices"][0]["message"]["content"] == "from openai"
+
+
+def test_chat_default_returns_last_error_when_everything_is_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    use_router(
+        monkeypatch,
+        {
+            "anthropic-default": failing(ProviderServerError("down", provider="a")),
+            "openai-default": failing(ProviderTimeoutError("slow", provider="o")),
+        },
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "chat-default", "messages": [HELLO]},
+    )
+
+    assert response.status_code == 504

@@ -1,11 +1,14 @@
 import math
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.api.schemas import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
+from app.core.router import Router
+from app.core.routes import DEFAULT_ROUTES
 from app.providers.anthropic import AnthropicProvider
 from app.providers.base import LLMProvider
 from app.providers.mock import MockProvider
@@ -20,6 +23,12 @@ providers: dict[str, LLMProvider] = {
     "anthropic-default": AnthropicProvider(),
 }
 
+gateway_router = Router(DEFAULT_ROUTES, providers)
+
+
+def get_router() -> Router:
+    return gateway_router
+
 
 @router.post(
     "/chat/completions",
@@ -27,18 +36,17 @@ providers: dict[str, LLMProvider] = {
 )
 async def create_chat_completion(
     request: ChatCompletionRequest,
+    response: Response,
+    routing: Annotated[Router, Depends(get_router)],
 ) -> ChatCompletionResponse:
-    provider = providers.get(request.model)
-
-    if provider is None:
+    if not routing.has_route(request.model):
         raise HTTPException(
             status_code=400,
             detail="Unsupported model",
         )
 
     try:
-        return await provider.complete(request)
-
+        result = await routing.complete(request)
     except ProviderError as exc:
         headers = None
         if exc.retry_after is not None:
@@ -48,3 +56,6 @@ async def create_chat_completion(
             detail=exc.detail,
             headers=headers,
         ) from None
+
+    response.headers["X-Provider"] = result.provider
+    return result.response
