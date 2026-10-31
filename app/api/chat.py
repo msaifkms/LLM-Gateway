@@ -1,4 +1,5 @@
-import httpx
+import math
+
 from fastapi import APIRouter, HTTPException
 
 from app.api.schemas import (
@@ -9,6 +10,7 @@ from app.providers.anthropic import AnthropicProvider
 from app.providers.base import LLMProvider
 from app.providers.mock import MockProvider
 from app.providers.openai import OpenAIProvider
+from app.resilience.errors import ProviderError
 
 router = APIRouter(prefix="/v1")
 
@@ -37,40 +39,12 @@ async def create_chat_completion(
     try:
         return await provider.complete(request)
 
-    except RuntimeError:
+    except ProviderError as exc:
+        headers = None
+        if exc.retry_after is not None:
+            headers = {"Retry-After": str(math.ceil(exc.retry_after))}
         raise HTTPException(
-            status_code=503,
-            detail="Provider configuration unavailable",
-        ) from None
-
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid provider request",
-        ) from None
-
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail="Upstream provider timed out",
-        ) from None
-
-    except httpx.HTTPStatusError as exc:
-        status = exc.response.status_code
-
-        if status == 429:
-            raise HTTPException(
-                status_code=429,
-                detail="Upstream provider rate limit exceeded",
-            ) from None
-
-        raise HTTPException(
-            status_code=502,
-            detail="Upstream provider rejected the request",
-        ) from None
-
-    except httpx.RequestError:
-        raise HTTPException(
-            status_code=502,
-            detail="Upstream provider connection failed",
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers=headers,
         ) from None
