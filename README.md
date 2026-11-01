@@ -4,7 +4,7 @@ A backend infrastructure project designed to provide a unified API for interacti
 
 The goal is to build a reliable, observable, and scalable LLM gateway with intelligent routing, caching, rate limiting, usage tracking, and automated model evaluation.
 
-The current implementation supports OpenAI, Anthropic, and a Mock provider through a single standardized API endpoint, with priority-based fallback routing, automatic retries, and per-provider circuit breakers.
+The current implementation supports OpenAI, Anthropic, and a Mock provider through a single standardized API endpoint, with priority-based fallback routing, automatic retries, per-provider circuit breakers, and a Redis response cache.
 
 ## Features
 
@@ -18,16 +18,20 @@ The current implementation supports OpenAI, Anthropic, and a Mock provider throu
 - Per-provider circuit breakers (closed, open, half-open)
 - Per-attempt timeouts and a whole-request deadline
 - Error taxonomy separating retryable, fallback-eligible, and client errors
-- `X-Provider` response header showing which provider answered
+- Redis exact-match response cache with configurable TTL
+- Cache rules per route, plus `Cache-Control: no-store` support
+- Single-flight request coalescing (identical concurrent requests share one provider call)
+- Fail-open caching: if Redis is down, the gateway keeps serving uncached
+- Shared pooled HTTP client created at application startup
+- `X-Provider` and `X-Cache` response headers
 - Request and response validation using Pydantic
 - Asynchronous HTTP communication using HTTPX
 - Token usage normalization
-- Automated unit, API, and fault-injection tests
+- Automated unit, API, fault-injection, concurrency, and real-Redis integration tests
 
 **Planned**
 
 - Configurable provider routing from a YAML file
-- Redis-based response caching
 - Rate limiting and usage quotas
 - API key authentication
 - PostgreSQL usage and cost tracking
@@ -39,10 +43,10 @@ The current implementation supports OpenAI, Anthropic, and a Mock provider throu
 
 - **Backend:** Python, FastAPI, Uvicorn, Pydantic, HTTPX
 - **Database:** PostgreSQL (integration planned)
-- **Caching:** Redis (integration planned)
+- **Caching:** Redis (redis-py, asyncio)
 - **Infrastructure:** Docker, Docker Compose
 - **Testing:** pytest, Ruff, mypy
-- **CI:** GitHub Actions, pre-commit
+- **CI:** GitHub Actions (with a Redis service container), pre-commit
 - **Cloud (planned):** AWS, Terraform
 
 ## How Requests Are Routed
@@ -77,6 +81,29 @@ A bad request (HTTP 400 from the provider) is never retried and never sent to an
 | Provider rate limit, authentication or configuration problem, or open circuit | 503 (with `Retry-After` when known) |
 
 When every provider in a route fails, the error from the last one is returned. Error messages shown to clients are generic and never include provider responses or credentials.
+
+## Caching
+
+Identical requests are answered from Redis instead of calling a provider again.
+
+**What is cached.** A response is cached only when the request is deterministic: `temperature` is `0`. The cache key is a SHA-256 hash of the route alias, messages, `temperature`, and `max_tokens`, so any change in those produces a different entry. Entries expire after `CACHE_TTL_SECONDS` (default 3600).
+
+**Per-route rules.** Each route has a cache mode: `auto` (cache deterministic requests), `temperature_zero` (cache only at temperature 0), or `never`. Routes that can reach Anthropic need care: Anthropic's current API version ignores `temperature`, so its answers are not guaranteed to be deterministic and `anthropic-default` is never cached.
+
+**Opting out.** Send `Cache-Control: no-store` to skip the cache for one request.
+
+**The `X-Cache` header**
+
+| Value | Meaning |
+|---|---|
+| `HIT` | Served from Redis; no provider was called |
+| `MISS` | Not in the cache; a provider answered and the result was stored |
+| `COALESCED` | An identical request was already in flight; this one shared its answer |
+| `BYPASS` | Not cacheable (temperature above 0, `no-store`, a `never` route, or no Redis) |
+
+**Stampede protection.** If many identical requests arrive while the answer is not cached yet, only the first calls the provider. The rest wait and share its result. Errors are shared too, and never cached.
+
+**Fail-open.** Redis problems never fail a request. If Redis is unreachable, the gateway logs one warning per outage and serves every request uncached. Corrupt cache entries are treated as a miss.
 
 ## Getting Started
 
@@ -123,7 +150,7 @@ Expected response:
 
 ### Test the LLM Gateway
 
-Send a request using the Mock provider:
+Send a request using the Mock provider (send it twice to see the cache):
 
 ```bash
 curl -i -X POST http://localhost:8000/v1/chat/completions \
@@ -135,11 +162,12 @@ curl -i -X POST http://localhost:8000/v1/chat/completions \
         "role": "user",
         "content": "Hello!"
       }
-    ]
+    ],
+    "temperature": 0
   }'
 ```
 
-The gateway returns a standardized JSON response containing the generated message, model information, and token usage. The `X-Provider` header shows which provider answered.
+The first call returns `X-Cache: MISS`; the second returns `X-Cache: HIT`. The `X-Provider` header shows which provider answered a miss.
 
 **Supported model aliases:**
 
@@ -148,6 +176,13 @@ The gateway returns a standardized JSON response containing the generated messag
 - `mock-1`: Simulated LLM responses
 - `openai-default`: OpenAI only
 - `anthropic-default`: Anthropic only
+
+**Configuration**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `REDIS_URL` | unset (no caching) | Redis connection URL |
+| `CACHE_TTL_SECONDS` | `3600` | How long cached responses live |
 
 Interactive API documentation is available at:
 
@@ -170,14 +205,24 @@ ruff format --check .
 mypy app
 ```
 
-Automated tests use simulated provider responses and a Mock provider with injected failures, so they cost nothing, need no network access, and run in seconds. Time-dependent behavior (backoff, breaker cooldowns, deadlines) is tested with a fake clock instead of real waiting.
+Automated tests use simulated provider responses, a Mock provider with injected failures, and an in-memory fake Redis, so they cost nothing, need no network access, and run in seconds. Time-dependent behavior (backoff, breaker cooldowns, deadlines) is tested with a fake clock instead of real waiting.
+
+**Tests against a real Redis** are skipped unless `TEST_REDIS_URL` is set. They use database 15 and flush it, so point them at a throwaway server:
+
+```bash
+docker run -d --name test-redis -p 6379:6379 redis:7-alpine
+TEST_REDIS_URL=redis://localhost:6379/15 python -m pytest -q
+docker rm -f test-redis
+```
+
+GitHub Actions runs these too, using a Redis service container.
 
 ## Development Progress
 
 - [x] Phase 0: Project setup, Docker, testing, and CI configuration
 - [x] Phase 1: Core LLM Gateway API and provider integrations
 - [x] Phase 2: Reliability, retries, fallback, and circuit breakers
-- [ ] Phase 3: Redis caching
+- [x] Phase 3: Redis caching
 - [ ] Phase 4: Authentication, rate limiting, quotas, and cost tracking
 - [ ] Phase 5: Observability and metrics
 - [ ] Phase 6: Evaluation harness
@@ -186,23 +231,16 @@ Automated tests use simulated provider responses and a Mock provider with inject
 
 ## Project Status
 
-**Phase 2 complete.**
+**Phase 3 complete.**
 
-The gateway routes requests across OpenAI, Anthropic, and Mock providers with automatic retries, fallback, circuit breaking, and timeouts. Failure behavior is covered by automated fault-injection tests, including a scenario where the primary provider fails every call and every request is still served by the fallback.
+Repeated deterministic requests are now served from Redis without calling a provider, identical concurrent requests share a single provider call, and the gateway keeps working if Redis goes down.
 
-PostgreSQL and Redis are configured as Docker services but are not yet integrated into the request pipeline.
+PostgreSQL is configured as a Docker service but is not yet integrated into the request pipeline.
 
 **Current limitations**
 
 - Routes are defined in code rather than a configuration file.
-- Circuit breaker state is kept in process memory, so it is not shared between gateway instances.
-- Anthropic's current API version (`2026-10-21`) does not accept a `temperature` parameter, so the gateway's `temperature` field has no effect on Anthropic requests.
-- No caching, authentication, rate limiting, or persistent usage and cost tracking yet.
-- Only text-based, non-streaming chat completions are supported.
-- Provider-specific functionality may not be fully represented in the normalized API.
-
-This project is under active development and is not yet intended for production use.
-
-## License
-
-MIT
+- Circuit breaker state and single-flight coalescing are kept in process memory, so they are not shared between gateway instances.
+- Cache keys are not yet scoped to a user. This is safe while the gateway has no authentication, but must be fixed in Phase 4 so one user can never be served another user's cached answer.
+- If Redis hangs rather than refusing connections, each cacheable request can wait up to about one second before falling back to the provider.
+- Anthropic's current API version (`2026-10-21`) does not accept a `temperature` parameter, so the gateway's `temperature` field
