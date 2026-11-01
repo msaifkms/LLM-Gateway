@@ -1,14 +1,19 @@
-import httpx
-from fastapi import APIRouter, HTTPException
+import math
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.api.schemas import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
+from app.core.router import Router
+from app.core.routes import DEFAULT_ROUTES
 from app.providers.anthropic import AnthropicProvider
 from app.providers.base import LLMProvider
 from app.providers.mock import MockProvider
 from app.providers.openai import OpenAIProvider
+from app.resilience.errors import ProviderError
 
 router = APIRouter(prefix="/v1")
 
@@ -18,6 +23,12 @@ providers: dict[str, LLMProvider] = {
     "anthropic-default": AnthropicProvider(),
 }
 
+gateway_router = Router(DEFAULT_ROUTES, providers)
+
+
+def get_router() -> Router:
+    return gateway_router
+
 
 @router.post(
     "/chat/completions",
@@ -25,52 +36,26 @@ providers: dict[str, LLMProvider] = {
 )
 async def create_chat_completion(
     request: ChatCompletionRequest,
+    response: Response,
+    routing: Annotated[Router, Depends(get_router)],
 ) -> ChatCompletionResponse:
-    provider = providers.get(request.model)
-
-    if provider is None:
+    if not routing.has_route(request.model):
         raise HTTPException(
             status_code=400,
             detail="Unsupported model",
         )
 
     try:
-        return await provider.complete(request)
-
-    except RuntimeError:
+        result = await routing.complete(request)
+    except ProviderError as exc:
+        headers = None
+        if exc.retry_after is not None:
+            headers = {"Retry-After": str(math.ceil(exc.retry_after))}
         raise HTTPException(
-            status_code=503,
-            detail="Provider configuration unavailable",
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers=headers,
         ) from None
 
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid provider request",
-        ) from None
-
-    except httpx.TimeoutException:
-        raise HTTPException(
-            status_code=504,
-            detail="Upstream provider timed out",
-        ) from None
-
-    except httpx.HTTPStatusError as exc:
-        status = exc.response.status_code
-
-        if status == 429:
-            raise HTTPException(
-                status_code=429,
-                detail="Upstream provider rate limit exceeded",
-            ) from None
-
-        raise HTTPException(
-            status_code=502,
-            detail="Upstream provider rejected the request",
-        ) from None
-
-    except httpx.RequestError:
-        raise HTTPException(
-            status_code=502,
-            detail="Upstream provider connection failed",
-        ) from None
+    response.headers["X-Provider"] = result.provider
+    return result.response
