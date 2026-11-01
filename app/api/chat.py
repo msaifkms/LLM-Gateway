@@ -1,13 +1,20 @@
 import math
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 
 from app.api.schemas import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from app.core.router import Router
+from app.core.cache import (
+    ResponseCache,
+    build_cache_key,
+    is_cacheable,
+    wants_no_store,
+)
+from app.core.router import Router, RouteResult
+from app.core.singleflight import SingleFlight
 from app.resilience.errors import ProviderError
 
 router = APIRouter(prefix="/v1")
@@ -19,6 +26,17 @@ def get_router(request: Request) -> Router:
     return gateway_router
 
 
+def get_cache(request: Request) -> ResponseCache | None:
+    """None when Redis is not configured: the gateway then runs uncached."""
+    cache: ResponseCache | None = request.app.state.cache
+    return cache
+
+
+def get_singleflight(request: Request) -> SingleFlight:
+    flight: SingleFlight = request.app.state.singleflight
+    return flight
+
+
 @router.post(
     "/chat/completions",
     response_model=ChatCompletionResponse,
@@ -27,15 +45,42 @@ async def create_chat_completion(
     request: ChatCompletionRequest,
     response: Response,
     routing: Annotated[Router, Depends(get_router)],
+    cache: Annotated[ResponseCache | None, Depends(get_cache)],
+    flight: Annotated[SingleFlight, Depends(get_singleflight)],
+    cache_control: Annotated[str | None, Header()] = None,
 ) -> ChatCompletionResponse:
-    if not routing.has_route(request.model):
+    route = routing.get_route(request.model)
+    if route is None:
         raise HTTPException(
             status_code=400,
             detail="Unsupported model",
         )
 
-    try:
+    cache_key: str | None = None
+    if (
+        cache is not None
+        and not wants_no_store(cache_control)
+        and is_cacheable(request, route)
+    ):
+        cache_key = build_cache_key(request)
+        cached = await cache.get(cache_key)
+        if cached is not None:
+            response.headers["X-Cache"] = "HIT"
+            return cached
+
+    async def fetch() -> RouteResult:
+        """Call the providers and, when cacheable, store the answer."""
         result = await routing.complete(request)
+        if cache is not None and cache_key is not None:
+            await cache.set(cache_key, result.response)
+        return result
+
+    try:
+        if cache_key is not None:
+            # Identical requests that miss at the same moment share one call.
+            result, is_leader = await flight.run(cache_key, fetch)
+        else:
+            result, is_leader = await fetch(), True
     except ProviderError as exc:
         headers = None
         if exc.retry_after is not None:
@@ -45,6 +90,13 @@ async def create_chat_completion(
             detail=exc.detail,
             headers=headers,
         ) from None
+
+    if cache_key is None:
+        response.headers["X-Cache"] = "BYPASS"
+    elif is_leader:
+        response.headers["X-Cache"] = "MISS"
+    else:
+        response.headers["X-Cache"] = "COALESCED"
 
     response.headers["X-Provider"] = result.provider
     return result.response
