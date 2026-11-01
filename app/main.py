@@ -5,6 +5,7 @@ import httpx
 from fastapi import FastAPI
 
 from app.api.chat import router as chat_router
+from app.core.cache import ResponseCache
 from app.core.config import Settings
 from app.core.redis_client import check_redis, create_redis
 from app.core.router import Router
@@ -29,6 +30,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             else None
         )
         app.state.redis = redis
+        app.state.cache = (
+            ResponseCache(redis, ttl_s=settings.cache_ttl_s)
+            if redis is not None
+            else None
+        )
 
         try:
             if redis is not None:

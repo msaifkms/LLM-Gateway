@@ -4,6 +4,17 @@ Hardcoded for now; the Route dataclass is what a YAML loader will build later.
 """
 
 from dataclasses import dataclass
+from enum import StrEnum
+
+
+class CacheMode(StrEnum):
+    #: Cache temperature-0 requests, but only if every target honors temperature.
+    AUTO = "auto"
+    #: Cache temperature-0 requests even if a target ignores temperature.
+    #: An explicit opt-in: the route author accepts that one sampled answer is reused.
+    TEMPERATURE_ZERO = "temperature_zero"
+    #: Never cache this route.
+    NEVER = "never"
 
 
 @dataclass(frozen=True)
@@ -12,6 +23,7 @@ class Route:
     timeout_s: float = 20.0  # per attempt
     max_retries: int = 2  # retries per target
     deadline_s: float = 45.0  # whole request, across all targets
+    cache: CacheMode = CacheMode.AUTO
 
     def __post_init__(self) -> None:
         if not self.targets:

@@ -76,3 +76,21 @@ def test_check_redis_returns_false_and_logs_instead_of_raising(
 
     assert result is False
     assert "unreachable" in caplog.text
+
+
+def test_cache_ttl_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CACHE_TTL_SECONDS", raising=False)
+    assert Settings.from_env().cache_ttl_s == 3600
+
+    monkeypatch.setenv("CACHE_TTL_SECONDS", "120")
+    assert Settings.from_env().cache_ttl_s == 120
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "soon"])
+def test_invalid_cache_ttl_fails_fast(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("CACHE_TTL_SECONDS", value)
+
+    with pytest.raises(ValueError):
+        Settings.from_env()

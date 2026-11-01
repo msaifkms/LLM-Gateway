@@ -54,6 +54,9 @@ class Router:
     def has_route(self, name: str) -> bool:
         return name in self._routes
 
+    def get_route(self, name: str) -> Route | None:
+        return self._routes.get(name)
+
     def breaker_state(self, provider: str) -> BreakerState:
         breaker = self._breakers.get(provider)
         return breaker.state if breaker else BreakerState.CLOSED
