@@ -1,13 +1,16 @@
+import asyncio
+
 import httpx
 import pytest
 from fake_redis import FakeRedis
 from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError as RedisConnectionError
 
-from app.api.chat import get_cache, get_router
+from app.api.chat import get_cache, get_router, get_singleflight
 from app.core.cache import ResponseCache
 from app.core.router import Router
 from app.core.routes import DEFAULT_ROUTES, CacheMode, Route
+from app.core.singleflight import SingleFlight
 from app.main import app
 from app.providers.mock import FailureMode, MockProvider
 
@@ -215,3 +218,88 @@ def test_never_route_is_not_cached(
 
     assert second.headers["x-cache"] == "BYPASS"
     assert providers["mock-1"].calls == 2
+
+
+# --- single-flight: concurrent identical requests --------------------------
+
+
+async def post_concurrently(
+    count: int, *, model: str = "mock-1"
+) -> list[httpx.Response]:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        return await asyncio.gather(
+            *[
+                http.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": "Hello!"}],
+                        "temperature": 0,
+                    },
+                )
+                for _ in range(count)
+            ]
+        )
+
+
+def install_for_concurrency(
+    monkeypatch: pytest.MonkeyPatch, provider: MockProvider, fake: FakeRedis
+) -> None:
+    # ASGITransport does not run the lifespan, so supply every dependency.
+    router = Router(
+        DEFAULT_ROUTES,
+        {
+            "mock-1": provider,
+            "openai-default": MockProvider("unused"),
+            "anthropic-default": MockProvider("unused"),
+        },
+    )
+    cache = ResponseCache(fake, ttl_s=3600)  # type: ignore[arg-type]
+    flight = SingleFlight()
+    monkeypatch.setitem(app.dependency_overrides, get_router, lambda: router)
+    monkeypatch.setitem(app.dependency_overrides, get_cache, lambda: cache)
+    monkeypatch.setitem(app.dependency_overrides, get_singleflight, lambda: flight)
+
+
+def test_concurrent_identical_misses_make_one_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MockProvider("shared answer", latency_s=0.2)
+    fake = FakeRedis()
+    install_for_concurrency(monkeypatch, provider, fake)
+
+    responses = asyncio.run(post_concurrently(8))
+
+    assert [r.status_code for r in responses] == [200] * 8
+    assert provider.calls == 1  # not 8
+    assert sorted(r.headers["x-cache"] for r in responses) == ["COALESCED"] * 7 + [
+        "MISS"
+    ]
+    assert len({r.json()["id"] for r in responses}) == 1  # same answer for everyone
+    assert fake.sets == 1
+
+
+def test_a_later_identical_request_is_a_plain_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MockProvider(latency_s=0.05)
+    install_for_concurrency(monkeypatch, provider, FakeRedis())
+
+    asyncio.run(post_concurrently(3))
+    later = asyncio.run(post_concurrently(1))
+
+    assert later[0].headers["x-cache"] == "HIT"
+    assert provider.calls == 1
+
+
+def test_concurrent_requests_share_a_failure_instead_of_stampeding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MockProvider(latency_s=0.1, failure_mode=FailureMode.BAD_REQUEST)
+    install_for_concurrency(monkeypatch, provider, FakeRedis())
+
+    responses = asyncio.run(post_concurrently(5))
+
+    assert [r.status_code for r in responses] == [400] * 5
+    assert provider.calls == 1

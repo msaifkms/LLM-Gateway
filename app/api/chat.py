@@ -13,7 +13,8 @@ from app.core.cache import (
     is_cacheable,
     wants_no_store,
 )
-from app.core.router import Router
+from app.core.router import Router, RouteResult
+from app.core.singleflight import SingleFlight
 from app.resilience.errors import ProviderError
 
 router = APIRouter(prefix="/v1")
@@ -31,6 +32,11 @@ def get_cache(request: Request) -> ResponseCache | None:
     return cache
 
 
+def get_singleflight(request: Request) -> SingleFlight:
+    flight: SingleFlight = request.app.state.singleflight
+    return flight
+
+
 @router.post(
     "/chat/completions",
     response_model=ChatCompletionResponse,
@@ -40,6 +46,7 @@ async def create_chat_completion(
     response: Response,
     routing: Annotated[Router, Depends(get_router)],
     cache: Annotated[ResponseCache | None, Depends(get_cache)],
+    flight: Annotated[SingleFlight, Depends(get_singleflight)],
     cache_control: Annotated[str | None, Header()] = None,
 ) -> ChatCompletionResponse:
     route = routing.get_route(request.model)
@@ -61,8 +68,19 @@ async def create_chat_completion(
             response.headers["X-Cache"] = "HIT"
             return cached
 
-    try:
+    async def fetch() -> RouteResult:
+        """Call the providers and, when cacheable, store the answer."""
         result = await routing.complete(request)
+        if cache is not None and cache_key is not None:
+            await cache.set(cache_key, result.response)
+        return result
+
+    try:
+        if cache_key is not None:
+            # Identical requests that miss at the same moment share one call.
+            result, is_leader = await flight.run(cache_key, fetch)
+        else:
+            result, is_leader = await fetch(), True
     except ProviderError as exc:
         headers = None
         if exc.retry_after is not None:
@@ -73,11 +91,12 @@ async def create_chat_completion(
             headers=headers,
         ) from None
 
-    if cache is not None and cache_key is not None:
-        await cache.set(cache_key, result.response)
+    if cache_key is None:
+        response.headers["X-Cache"] = "BYPASS"
+    elif is_leader:
         response.headers["X-Cache"] = "MISS"
     else:
-        response.headers["X-Cache"] = "BYPASS"
+        response.headers["X-Cache"] = "COALESCED"
 
     response.headers["X-Provider"] = result.provider
     return result.response

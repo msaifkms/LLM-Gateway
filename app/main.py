@@ -10,6 +10,7 @@ from app.core.config import Settings
 from app.core.redis_client import check_redis, create_redis
 from app.core.router import Router
 from app.core.routes import DEFAULT_ROUTES
+from app.core.singleflight import SingleFlight
 from app.providers.registry import build_providers
 
 
@@ -23,6 +24,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
     ) as http_client:
         app.state.router = Router(DEFAULT_ROUTES, build_providers(http_client))
+        app.state.singleflight = SingleFlight()
 
         redis = (
             create_redis(settings.redis_url, settings.redis_timeout_s)
