@@ -1,32 +1,21 @@
 import math
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from app.api.schemas import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
 from app.core.router import Router
-from app.core.routes import DEFAULT_ROUTES
-from app.providers.anthropic import AnthropicProvider
-from app.providers.base import LLMProvider
-from app.providers.mock import MockProvider
-from app.providers.openai import OpenAIProvider
 from app.resilience.errors import ProviderError
 
 router = APIRouter(prefix="/v1")
 
-providers: dict[str, LLMProvider] = {
-    "mock-1": MockProvider(),
-    "openai-default": OpenAIProvider(),
-    "anthropic-default": AnthropicProvider(),
-}
 
-gateway_router = Router(DEFAULT_ROUTES, providers)
-
-
-def get_router() -> Router:
+def get_router(request: Request) -> Router:
+    """The Router is built once at startup (see lifespan in app/main.py)."""
+    gateway_router: Router = request.app.state.router
     return gateway_router
 
 

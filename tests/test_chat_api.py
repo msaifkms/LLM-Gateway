@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.chat import get_router, providers
+from app.api.chat import get_router
 from app.core.router import Router
 from app.core.routes import DEFAULT_ROUTES
 from app.main import app
@@ -22,8 +22,6 @@ from app.resilience.errors import (
     ProviderTimeoutError,
 )
 
-client = TestClient(app)
-
 HELLO = {"role": "user", "content": "Hello!"}
 
 
@@ -39,11 +37,17 @@ class FakeClock:
 
 
 def use_router(monkeypatch: pytest.MonkeyPatch, overrides: dict[str, object]) -> None:
-    """Swap in a fresh router (own breakers, instant sleeps) for one test."""
+    """Swap in a fresh router (own breakers, instant sleeps, no real adapters)."""
     clock = FakeClock()
+    providers = {
+        "mock-1": MockProvider(),
+        "openai-default": MockProvider(),
+        "anthropic-default": MockProvider(),
+        **overrides,
+    }
     router = Router(
         DEFAULT_ROUTES,
-        {**providers, **overrides},
+        providers,
         sleep=clock.sleep,
         clock=clock,
         rng=random.Random(0),
@@ -57,14 +61,7 @@ def failing(error: Exception) -> AsyncMock:
     return mock
 
 
-def post(model: str) -> object:
-    return client.post(
-        "/v1/chat/completions",
-        json={"model": model, "messages": [HELLO]},
-    )
-
-
-def test_chat_completion_success() -> None:
+def test_chat_completion_success(client: TestClient) -> None:
     response = client.post(
         "/v1/chat/completions",
         json={"model": "mock-1", "messages": [HELLO]},
@@ -80,7 +77,7 @@ def test_chat_completion_success() -> None:
     assert data["choices"][0]["message"]["content"] == "Hello from the Mock LLM!"
 
 
-def test_unsupported_model() -> None:
+def test_unsupported_model(client: TestClient) -> None:
     response = client.post(
         "/v1/chat/completions",
         json={"model": "unknown-model", "messages": [HELLO]},
@@ -89,7 +86,7 @@ def test_unsupported_model() -> None:
     assert response.status_code == 400
 
 
-def test_invalid_request() -> None:
+def test_invalid_request(client: TestClient) -> None:
     response = client.post(
         "/v1/chat/completions",
         json={"model": "mock-1", "messages": []},
@@ -113,7 +110,10 @@ def test_invalid_request() -> None:
     ],
 )
 def test_provider_errors_map_to_http_status(
-    monkeypatch: pytest.MonkeyPatch, error: ProviderError, status: int
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    error: ProviderError,
+    status: int,
 ) -> None:
     use_router(monkeypatch, {"openai-default": failing(error)})
 
@@ -127,7 +127,7 @@ def test_provider_errors_map_to_http_status(
 
 
 def test_rate_limit_sets_retry_after_header(
-    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     error = ProviderRateLimitError("limited", provider="openai", retry_after=2.5)
     use_router(monkeypatch, {"openai-default": failing(error)})
@@ -142,7 +142,7 @@ def test_rate_limit_sets_retry_after_header(
 
 
 def test_chat_default_falls_back_to_second_provider(
-    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     use_router(
         monkeypatch,
@@ -163,7 +163,7 @@ def test_chat_default_falls_back_to_second_provider(
 
 
 def test_chat_default_returns_last_error_when_everything_is_down(
-    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     use_router(
         monkeypatch,

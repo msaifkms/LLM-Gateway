@@ -59,6 +59,12 @@ def call_anthropic(handler: Handler) -> ChatCompletionResponse:
 ADAPTERS = pytest.mark.parametrize("call", [call_openai, call_anthropic])
 
 
+def unused_client() -> httpx.AsyncClient:
+    """For tests that fail before any HTTP call is made."""
+    transport = httpx.MockTransport(lambda request: httpx.Response(500))
+    return httpx.AsyncClient(transport=transport)
+
+
 def raise_timeout(request: httpx.Request) -> httpx.Response:
     raise httpx.ReadTimeout("simulated timeout", request=request)
 
@@ -156,14 +162,14 @@ def test_missing_api_key(
     env_var: str,
 ) -> None:
     monkeypatch.delenv(env_var, raising=False)
-    provider = provider_cls(api_key=None)
+    provider = provider_cls(api_key=None, client=unused_client())
 
     with pytest.raises(ProviderConfigError):
         asyncio.run(provider.complete(USER_REQUEST))
 
 
 def test_anthropic_rejects_system_only_conversation() -> None:
-    provider = AnthropicProvider(api_key="test-key")
+    provider = AnthropicProvider(api_key="test-key", client=unused_client())
     request = ChatCompletionRequest(
         model="test",
         messages=[ChatMessage(role="system", content="Be brief.")],
@@ -173,3 +179,18 @@ def test_anthropic_rejects_system_only_conversation() -> None:
         asyncio.run(provider.complete(request))
 
     assert "non-system" in info.value.detail
+
+
+def test_adapter_does_not_close_the_shared_client() -> None:
+    async def run() -> None:
+        transport = httpx.MockTransport(lambda request: httpx.Response(500))
+        async with httpx.AsyncClient(transport=transport) as client:
+            provider = OpenAIProvider(api_key="k", client=client)
+
+            for _ in range(2):
+                with pytest.raises(ProviderServerError):
+                    await provider.complete(USER_REQUEST)
+
+            assert not client.is_closed  # still usable by the next request
+
+    asyncio.run(run())
