@@ -7,9 +7,13 @@ from app.main import app
 
 
 @pytest.fixture(autouse=True)
-def no_redis_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Tests never touch a real Redis unless they opt in. Empty URL = disabled."""
+def no_external_services_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never touch a real Redis or Postgres unless they opt in.
+
+    An empty URL means "not configured".
+    """
     monkeypatch.setenv("REDIS_URL", "")
+    monkeypatch.setenv("DATABASE_URL", "")
 
 
 @pytest.fixture

@@ -53,3 +53,19 @@ def test_adapters_share_one_pooled_http_client(client: TestClient) -> None:
     assert openai.client is anthropic.client
     assert isinstance(openai.client, httpx.AsyncClient)
     assert not openai.client.is_closed
+
+
+def test_startup_skips_postgres_when_unconfigured(client: TestClient) -> None:
+    assert app.state.db is None
+
+
+def test_gateway_starts_when_postgres_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Port 1 refuses connections immediately, like a Postgres that is down.
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@127.0.0.1:1/gateway")
+
+    with TestClient(app) as test_client:
+        assert app.state.db is not None  # the pool exists; it connects lazily
+        assert test_client.get("/healthz").status_code == 200
+        assert test_client.get("/readyz").status_code == 503
