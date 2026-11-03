@@ -3,10 +3,12 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 
+from app.api.auth import authenticate
 from app.api.schemas import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
+from app.auth.store import Principal
 from app.core.cache import (
     ResponseCache,
     build_cache_key,
@@ -44,6 +46,7 @@ def get_singleflight(request: Request) -> SingleFlight:
 async def create_chat_completion(
     request: ChatCompletionRequest,
     response: Response,
+    principal: Annotated[Principal, Depends(authenticate)],
     routing: Annotated[Router, Depends(get_router)],
     cache: Annotated[ResponseCache | None, Depends(get_cache)],
     flight: Annotated[SingleFlight, Depends(get_singleflight)],
@@ -59,10 +62,11 @@ async def create_chat_completion(
     cache_key: str | None = None
     if (
         cache is not None
+        and principal.cache_enabled
         and not wants_no_store(cache_control)
         and is_cacheable(request, route)
     ):
-        cache_key = build_cache_key(request)
+        cache_key = build_cache_key(request, principal.user_id)
         cached = await cache.get(cache_key)
         if cached is not None:
             response.headers["X-Cache"] = "HIT"

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 #: Bump when the key layout or the stored format changes, so old entries are
 #: ignored instead of misread.
-KEY_VERSION = 1
+KEY_VERSION = 2
 KEY_PREFIX = f"llmgw:cache:v{KEY_VERSION}:"
 
 #: Providers that ignore the request's temperature (Anthropic API version
@@ -27,10 +27,15 @@ KEY_PREFIX = f"llmgw:cache:v{KEY_VERSION}:"
 TEMPERATURE_IGNORED_TARGETS = frozenset({"anthropic-default"})
 
 
-def build_cache_key(request: ChatCompletionRequest) -> str:
-    """SHA-256 of the canonical JSON of everything that shapes the answer."""
+def build_cache_key(request: ChatCompletionRequest, user_id: int) -> str:
+    """SHA-256 of the canonical JSON of everything that shapes the answer.
+
+    The user is part of the key: a cached answer is that user's data, so one
+    user must never be served another user's entry.
+    """
     canonical = json.dumps(
         {
+            "user": user_id,
             "model": request.model,  # the route alias, not the upstream model
             "messages": [message.model_dump() for message in request.messages],
             "temperature": request.temperature,

@@ -6,6 +6,7 @@ import httpx
 from fastapi import FastAPI, Request, Response
 
 from app.api.chat import router as chat_router
+from app.auth.store import PostgresKeyStore
 from app.core.cache import ResponseCache
 from app.core.config import Settings
 from app.core.redis_client import check_redis, create_redis
@@ -34,6 +35,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             else None
         )
         app.state.db = db
+        app.state.key_store = PostgresKeyStore(db) if db is not None else None
 
         redis = (
             create_redis(settings.redis_url, settings.redis_timeout_s)
