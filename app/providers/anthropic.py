@@ -60,7 +60,8 @@ class AnthropicProvider:
         self,
         api_key: str | None = None,
         model: str | None = None,
-        client: httpx.AsyncClient | None = None,
+        *,
+        client: httpx.AsyncClient,
     ) -> None:
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
         self.model = model or os.getenv("ANTHROPIC_MODEL", "claude-haiku-5-5")
@@ -96,29 +97,17 @@ class AnthropicProvider:
         if system_messages:
             payload["system"] = "\n\n".join(system_messages)
 
-        headers = {
-            "x-api-key": api_key,
-            "anthropic-version": ANTHROPIC_VERSION,
-            "content-type": "application/json",
-        }
-
-        if self.client is not None:
-            data = await post_json(
-                self.client,
-                provider=PROVIDER_NAME,
-                url=ANTHROPIC_URL,
-                headers=headers,
-                payload=payload,
-            )
-        else:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                data = await post_json(
-                    client,
-                    provider=PROVIDER_NAME,
-                    url=ANTHROPIC_URL,
-                    headers=headers,
-                    payload=payload,
-                )
+        data = await post_json(
+            self.client,
+            provider=PROVIDER_NAME,
+            url=ANTHROPIC_URL,
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": ANTHROPIC_VERSION,
+                "content-type": "application/json",
+            },
+            payload=payload,
+        )
 
         try:
             return _to_response(data)

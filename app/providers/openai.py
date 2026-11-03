@@ -19,7 +19,8 @@ class OpenAIProvider:
         self,
         api_key: str | None = None,
         model: str | None = None,
-        client: httpx.AsyncClient | None = None,
+        *,
+        client: httpx.AsyncClient,
     ) -> None:
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.model = model or os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
@@ -40,28 +41,16 @@ class OpenAIProvider:
         if request.max_tokens is not None:
             payload["max_completion_tokens"] = request.max_tokens
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        if self.client is not None:
-            data = await post_json(
-                self.client,
-                provider=PROVIDER_NAME,
-                url=OPENAI_URL,
-                headers=headers,
-                payload=payload,
-            )
-        else:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                data = await post_json(
-                    client,
-                    provider=PROVIDER_NAME,
-                    url=OPENAI_URL,
-                    headers=headers,
-                    payload=payload,
-                )
+        data = await post_json(
+            self.client,
+            provider=PROVIDER_NAME,
+            url=OPENAI_URL,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            payload=payload,
+        )
 
         try:
             return ChatCompletionResponse.model_validate(data)
