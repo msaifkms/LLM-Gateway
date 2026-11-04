@@ -6,15 +6,18 @@ import httpx
 from fastapi import FastAPI, Request, Response
 
 from app.api.chat import router as chat_router
+from app.api.usage import router as usage_router
 from app.auth.store import PostgresKeyStore
 from app.core.cache import ResponseCache
 from app.core.config import Settings
+from app.core.ratelimit import RateLimiter
 from app.core.redis_client import check_redis, create_redis
 from app.core.router import Router
 from app.core.routes import DEFAULT_ROUTES
 from app.core.singleflight import SingleFlight
 from app.db.pool import check_db, create_db_pool
 from app.providers.registry import build_providers
+from app.usage.store import PostgresUsageStore
 
 
 @asynccontextmanager
@@ -36,6 +39,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         app.state.db = db
         app.state.key_store = PostgresKeyStore(db) if db is not None else None
+        app.state.usage_store = PostgresUsageStore(db) if db is not None else None
 
         redis = (
             create_redis(settings.redis_url, settings.redis_timeout_s)
@@ -45,6 +49,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.redis = redis
         app.state.cache = (
             ResponseCache(redis, ttl_s=settings.cache_ttl_s)
+            if redis is not None
+            else None
+        )
+
+        app.state.rate_limiter = (
+            RateLimiter(redis, fail_open=settings.rate_limit_fail_open)
             if redis is not None
             else None
         )
@@ -107,3 +117,4 @@ async def readiness(request: Request, response: Response) -> dict[str, str]:
 
 
 app.include_router(chat_router)
+app.include_router(usage_router)

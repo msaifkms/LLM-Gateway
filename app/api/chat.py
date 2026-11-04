@@ -3,11 +3,12 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 
-from app.api.auth import authenticate
+from app.api.rate_limit import rate_limit
 from app.api.schemas import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
+from app.api.usage import get_usage_store
 from app.auth.store import Principal
 from app.core.cache import (
     ResponseCache,
@@ -18,6 +19,8 @@ from app.core.cache import (
 from app.core.router import Router, RouteResult
 from app.core.singleflight import SingleFlight
 from app.resilience.errors import ProviderError
+from app.usage.recorder import build_event, record_usage
+from app.usage.store import UsageStore
 
 router = APIRouter(prefix="/v1")
 
@@ -46,10 +49,11 @@ def get_singleflight(request: Request) -> SingleFlight:
 async def create_chat_completion(
     request: ChatCompletionRequest,
     response: Response,
-    principal: Annotated[Principal, Depends(authenticate)],
+    principal: Annotated[Principal, Depends(rate_limit)],
     routing: Annotated[Router, Depends(get_router)],
     cache: Annotated[ResponseCache | None, Depends(get_cache)],
     flight: Annotated[SingleFlight, Depends(get_singleflight)],
+    usage_store: Annotated[UsageStore | None, Depends(get_usage_store)],
     cache_control: Annotated[str | None, Header()] = None,
 ) -> ChatCompletionResponse:
     route = routing.get_route(request.model)
@@ -70,6 +74,10 @@ async def create_chat_completion(
         cached = await cache.get(cache_key)
         if cached is not None:
             response.headers["X-Cache"] = "HIT"
+            await record_usage(
+                usage_store,
+                build_event(principal, request.model, "HIT", "cache", cached),
+            )
             return cached
 
     async def fetch() -> RouteResult:
@@ -96,11 +104,18 @@ async def create_chat_completion(
         ) from None
 
     if cache_key is None:
-        response.headers["X-Cache"] = "BYPASS"
+        cache_status = "BYPASS"
     elif is_leader:
-        response.headers["X-Cache"] = "MISS"
+        cache_status = "MISS"
     else:
-        response.headers["X-Cache"] = "COALESCED"
+        cache_status = "COALESCED"
 
+    response.headers["X-Cache"] = cache_status
     response.headers["X-Provider"] = result.provider
+    await record_usage(
+        usage_store,
+        build_event(
+            principal, request.model, cache_status, result.provider, result.response
+        ),
+    )
     return result.response

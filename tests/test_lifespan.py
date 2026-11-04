@@ -69,3 +69,37 @@ def test_gateway_starts_when_postgres_is_unreachable(
         assert app.state.db is not None  # the pool exists; it connects lazily
         assert test_client.get("/healthz").status_code == 200
         assert test_client.get("/readyz").status_code == 503
+
+
+def test_the_usage_store_exists_only_when_postgres_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(app):
+        assert app.state.usage_store is None  # conftest runs with no database
+
+
+def test_the_rate_limiter_exists_only_when_redis_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with TestClient(app):
+        assert app.state.rate_limiter is None  # conftest runs with no Redis
+
+    monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:1/0")
+    with TestClient(app):
+        assert app.state.rate_limiter is not None
+
+
+def test_a_down_redis_refuses_requests_when_the_limiter_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:1/0")
+    monkeypatch.setenv("RATE_LIMIT_FAIL_OPEN", "false")
+
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/chat/completions",
+            json={"model": "mock-1", "messages": [{"role": "user", "content": "Hi"}]},
+        )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Rate limiting is unavailable"}

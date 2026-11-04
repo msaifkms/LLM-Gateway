@@ -10,6 +10,17 @@ DEFAULT_CACHE_TTL_S = 3600
 DEFAULT_DB_POOL_MAX = 10
 
 
+def _parse_bool(name: str, *, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes"}:
+        return True
+    if raw in {"0", "false", "no"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
 @dataclass(frozen=True)
 class Settings:
     #: None means "no Redis": the gateway runs without a cache.
@@ -22,6 +33,8 @@ class Settings:
     database_url: str | None = None
     #: Maximum simultaneous Postgres connections held by this gateway instance.
     db_pool_max: int = DEFAULT_DB_POOL_MAX
+    #: If Redis is down: True lets requests through unlimited, False refuses them.
+    rate_limit_fail_open: bool = True
 
     @classmethod
     def from_env(cls) -> Self:
@@ -35,6 +48,7 @@ class Settings:
         pool_max = int(os.getenv("DB_POOL_MAX", str(DEFAULT_DB_POOL_MAX)))
         if pool_max <= 0:
             raise ValueError("DB_POOL_MAX must be a positive integer")
+        fail_open = _parse_bool("RATE_LIMIT_FAIL_OPEN", default=True)
 
         return cls(
             redis_url=redis_url or None,
@@ -42,4 +56,5 @@ class Settings:
             cache_ttl_s=ttl_s,
             database_url=database_url or None,
             db_pool_max=pool_max,
+            rate_limit_fail_open=fail_open,
         )

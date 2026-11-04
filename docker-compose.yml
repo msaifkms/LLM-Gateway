@@ -8,6 +8,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-3600}
       DATABASE_URL: postgresql://gateway:local_dev_only@postgres:5432/gateway
+      RATE_LIMIT_FAIL_OPEN: ${RATE_LIMIT_FAIL_OPEN:-true}
     build: .
     ports:
       - "127.0.0.1:8000:8000"
