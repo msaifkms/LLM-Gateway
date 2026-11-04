@@ -3,6 +3,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 
+from app.api.killswitch import require_gateway_enabled
+from app.api.quota import enforce_quota
 from app.api.rate_limit import rate_limit
 from app.api.schemas import (
     ChatCompletionRequest,
@@ -47,6 +49,7 @@ def get_singleflight(request: Request) -> SingleFlight:
     response_model=ChatCompletionResponse,
 )
 async def create_chat_completion(
+    _enabled: Annotated[None, Depends(require_gateway_enabled)],
     request: ChatCompletionRequest,
     response: Response,
     principal: Annotated[Principal, Depends(rate_limit)],
@@ -79,6 +82,9 @@ async def create_chat_completion(
                 build_event(principal, request.model, "HIT", "cache", cached),
             )
             return cached
+
+    # A provider is about to be paid for (cache hits returned above, free).
+    await enforce_quota(principal, usage_store)
 
     async def fetch() -> RouteResult:
         """Call the providers and, when cacheable, store the answer."""

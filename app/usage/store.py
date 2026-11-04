@@ -58,8 +58,18 @@ class UsageSummary:
     by_day: list[DayUsage]
 
 
+@dataclass(frozen=True)
+class DailyUsage:
+    """What a user has spent so far today (UTC), counting only provider calls."""
+
+    billed_tokens: int
+    cost_usd: Decimal
+
+
 class UsageStore(Protocol):
     async def record(self, event: UsageEvent) -> None: ...
+
+    async def usage_today(self, user_id: int) -> DailyUsage: ...
 
     async def summary(self, user_id: int, days: int) -> UsageSummary: ...
 
@@ -69,6 +79,18 @@ INSERT INTO usage_events (
     user_id, api_key_id, route, provider, model, cache_status,
     prompt_tokens, completion_tokens, cost_usd, list_cost_usd, priced
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+"""
+
+USAGE_TODAY_SQL = """
+SELECT COALESCE(
+           sum(prompt_tokens + completion_tokens)
+               FILTER (WHERE cache_status IN ('MISS', 'BYPASS')),
+           0
+       )::bigint AS billed_tokens,
+       COALESCE(sum(cost_usd), 0) AS cost_usd
+FROM usage_events
+WHERE user_id = $1
+  AND created_at >= (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')
 """
 
 WINDOW = "user_id = $1 AND created_at >= now() - make_interval(days => $2)"
@@ -128,6 +150,11 @@ class PostgresUsageStore:
             event.list_cost_usd,
             event.priced,
         )
+
+    async def usage_today(self, user_id: int) -> DailyUsage:
+        row = await self._pool.fetchrow(USAGE_TODAY_SQL, user_id)
+        assert row is not None  # an aggregate query always returns one row
+        return DailyUsage(billed_tokens=row["billed_tokens"], cost_usd=row["cost_usd"])
 
     async def summary(self, user_id: int, days: int) -> UsageSummary:
         async with self._pool.acquire() as conn:

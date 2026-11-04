@@ -4,6 +4,9 @@
     python -m app.cli issue-key alice --label laptop
     python -m app.cli revoke-key 3
     python -m app.cli list-keys
+    python -m app.cli set-limits alice --daily-tokens 200000 --daily-usd none
+    python -m app.cli kill-switch on --reason "provider incident"
+    python -m app.cli kill-switch status
 
 In Docker:  docker compose run --rm gateway python -m app.cli list-keys
 """
@@ -18,6 +21,7 @@ import asyncpg
 
 from app.auth import admin
 from app.core.config import Settings
+from app.core.killswitch import PostgresKillSwitchStore
 from app.db.pool import create_db_pool
 
 
@@ -39,6 +43,18 @@ def positive_decimal(text: str) -> Decimal:
     if not value.is_finite() or value <= 0:
         raise argparse.ArgumentTypeError("must be greater than 0")
     return value
+
+
+#: What "--daily-tokens none" parses to: remove the limit (as opposed to leaving it).
+CLEAR = object()
+
+
+def int_or_none(text: str) -> object:
+    return CLEAR if text.strip().lower() == "none" else positive_int(text)
+
+
+def decimal_or_none(text: str) -> object:
+    return CLEAR if text.strip().lower() == "none" else positive_decimal(text)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,6 +84,22 @@ def build_parser() -> argparse.ArgumentParser:
     listing = commands.add_parser("list-keys", help="list API keys")
     listing.add_argument("user", nargs="?", help="only this user's keys")
 
+    limits = commands.add_parser("set-limits", help="change a user's limits")
+    limits.add_argument("user")
+    limits.add_argument("--rate-limit", type=positive_int, help="requests per minute")
+    limits.add_argument(
+        "--daily-tokens", type=int_or_none, help="daily token cap, or 'none'"
+    )
+    limits.add_argument(
+        "--daily-usd", type=decimal_or_none, help="daily cost cap, or 'none'"
+    )
+
+    switch = commands.add_parser(
+        "kill-switch", help="pause or resume all chat requests"
+    )
+    switch.add_argument("action", choices=["on", "off", "status"])
+    switch.add_argument("--reason", default="", help="a note shown by 'status'")
+
     return parser
 
 
@@ -94,6 +126,28 @@ async def run_command(args: argparse.Namespace, pool: asyncpg.Pool) -> None:
     elif args.command == "revoke-key":
         await admin.revoke_key(pool, args.key_id)
         print(f"Revoked key {args.key_id}.")
+
+    elif args.command == "set-limits":
+        changes: dict[str, object] = {}
+        for column, value in [
+            ("rate_limit_per_min", args.rate_limit),
+            ("daily_token_limit", args.daily_tokens),
+            ("daily_usd_limit", args.daily_usd),
+        ]:
+            if value is not None:  # not mentioned: leave as it is
+                changes[column] = None if value is CLEAR else value
+        await admin.set_limits(pool, args.user, **changes)
+        print(f"Updated limits for {args.user!r}.")
+
+    elif args.command == "kill-switch":
+        flag = PostgresKillSwitchStore(pool)
+        if args.action == "status":
+            state = await flag.get()
+            reason = f" ({state.reason})" if state.reason else ""
+            print(f"Kill switch is {'ON' if state.enabled else 'off'}{reason}.")
+        else:
+            await flag.set(args.action == "on", args.reason)
+            print(f"Kill switch turned {args.action}. Gateways notice within seconds.")
 
     elif args.command == "list-keys":
         rows = await admin.list_keys(pool, args.user)

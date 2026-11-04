@@ -90,3 +90,26 @@ async def list_keys(pool: asyncpg.Pool, user_name: str | None = None) -> list[An
             user_name,
         )
     )
+
+
+#: The only columns set_limits may touch. Names go into the SQL text, so they must
+#: come from this list and never from user input.
+LIMIT_COLUMNS = ("rate_limit_per_min", "daily_token_limit", "daily_usd_limit")
+
+
+async def set_limits(pool: asyncpg.Pool, user_name: str, **limits: Any) -> None:
+    """Change some of a user's limits. A value of None removes a daily limit."""
+    unknown = set(limits) - set(LIMIT_COLUMNS)
+    if unknown:
+        raise ValueError(f"unknown limits: {sorted(unknown)}")
+    if not limits:
+        raise AdminError("nothing to change; pass at least one limit")
+
+    assignments = ", ".join(f"{column} = ${i}" for i, column in enumerate(limits, 2))
+    updated = await pool.fetchval(
+        f"UPDATE users SET {assignments} WHERE name = $1 RETURNING id",
+        user_name,
+        *limits.values(),
+    )
+    if updated is None:
+        raise AdminError(f"no user named {user_name!r}")

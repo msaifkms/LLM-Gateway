@@ -68,9 +68,13 @@ def test_migrations_create_tables_and_are_idempotent(database_url: str) -> None:
 
     first, second, tables = asyncio.run(scenario())
 
-    assert first == ["001_users_and_api_keys", "002_usage_events"]
+    assert first == [
+        "001_users_and_api_keys",
+        "002_usage_events",
+        "003_gateway_flags",
+    ]
     assert second == []  # already applied: nothing to do
-    assert {"users", "api_keys", "usage_events", "schema_migrations"} <= tables
+    assert {"users", "api_keys", "usage_events", "gateway_flags"} <= tables
 
 
 def test_two_instances_migrating_at_once_apply_each_file_once(
@@ -88,7 +92,10 @@ def test_two_instances_migrating_at_once_apply_each_file_once(
 
     results = asyncio.run(scenario())
 
-    assert sorted(results) == [[], ["001_users_and_api_keys", "002_usage_events"]]
+    assert sorted(results) == [
+        [],
+        ["001_users_and_api_keys", "002_usage_events", "003_gateway_flags"],
+    ]
 
 
 def test_constraints_protect_the_data(database_url: str) -> None:

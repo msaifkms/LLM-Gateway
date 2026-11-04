@@ -10,6 +10,7 @@ from app.api.usage import router as usage_router
 from app.auth.store import PostgresKeyStore
 from app.core.cache import ResponseCache
 from app.core.config import Settings
+from app.core.killswitch import KillSwitch, PostgresKillSwitchStore
 from app.core.ratelimit import RateLimiter
 from app.core.redis_client import check_redis, create_redis
 from app.core.router import Router
@@ -40,6 +41,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.db = db
         app.state.key_store = PostgresKeyStore(db) if db is not None else None
         app.state.usage_store = PostgresUsageStore(db) if db is not None else None
+        app.state.kill_switch = (
+            KillSwitch(PostgresKillSwitchStore(db)) if db is not None else None
+        )
 
         redis = (
             create_redis(settings.redis_url, settings.redis_timeout_s)

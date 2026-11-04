@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.cli import build_parser, main
+from app.cli import CLEAR, build_parser, main
 
 
 def parse(*argv: str):  # type: ignore[no-untyped-def]
@@ -76,3 +76,59 @@ def test_the_cli_refuses_to_run_without_a_database(
 
     assert main(["list-keys"]) == 2
     assert "DATABASE_URL is not set" in capsys.readouterr().err
+
+
+def test_set_limits_changes_only_what_is_mentioned() -> None:
+    args = parse("set-limits", "alice", "--rate-limit", "10")
+
+    assert args.user == "alice"
+    assert args.rate_limit == 10
+    assert args.daily_tokens is None  # not mentioned: left alone
+    assert args.daily_usd is None
+
+
+def test_set_limits_accepts_numbers_or_none() -> None:
+    args = parse(
+        "set-limits", "alice", "--daily-tokens", "200000", "--daily-usd", "1.5"
+    )
+
+    assert args.daily_tokens == 200000
+    assert args.daily_usd == Decimal("1.5")
+
+
+def test_set_limits_none_means_remove_the_limit() -> None:
+    args = parse("set-limits", "alice", "--daily-tokens", "none", "--daily-usd", "NONE")
+
+    assert args.daily_tokens is CLEAR
+    assert args.daily_usd is CLEAR
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["set-limits"],  # a user is required
+        [
+            "set-limits",
+            "alice",
+            "--rate-limit",
+            "none",
+        ],  # a rate limit cannot be removed
+        ["set-limits", "alice", "--daily-tokens", "0"],
+        ["set-limits", "alice", "--daily-usd", "-2"],
+        ["kill-switch"],  # an action is required
+        ["kill-switch", "maybe"],
+    ],
+)
+def test_bad_set_limits_and_kill_switch_arguments_are_rejected(
+    argv: list[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(argv)
+
+    assert exc.value.code == 2
+
+
+def test_kill_switch_actions() -> None:
+    assert parse("kill-switch", "on", "--reason", "incident").reason == "incident"
+    assert parse("kill-switch", "off").action == "off"
+    assert parse("kill-switch", "status").reason == ""
