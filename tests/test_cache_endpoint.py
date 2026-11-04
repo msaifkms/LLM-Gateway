@@ -1,12 +1,16 @@
 import asyncio
+from typing import Annotated
 
 import httpx
 import pytest
 from fake_redis import FakeRedis
+from fastapi import Header
 from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError as RedisConnectionError
 
+from app.api.auth import authenticate
 from app.api.chat import get_cache, get_router, get_singleflight
+from app.auth.store import Principal
 from app.core.cache import ResponseCache
 from app.core.router import Router
 from app.core.routes import DEFAULT_ROUTES, CacheMode, Route
@@ -303,3 +307,93 @@ def test_concurrent_requests_share_a_failure_instead_of_stampeding(
 
     assert [r.status_code for r in responses] == [400] * 5
     assert provider.calls == 1
+
+
+# --- cache privacy: entries belong to the user who made them ----------------
+
+
+def act_as_users_from_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Authenticate as whoever the X-Test-User header names (default user 1)."""
+
+    def override(
+        x_test_user: Annotated[int, Header()] = 1,
+        x_test_cache: Annotated[str, Header()] = "on",
+    ) -> Principal:
+        return Principal(
+            user_id=x_test_user,
+            user_name=f"user-{x_test_user}",
+            key_id=x_test_user,
+            rate_limit_per_min=60,
+            daily_token_limit=None,
+            daily_usd_limit=None,
+            cache_enabled=x_test_cache == "on",
+        )
+
+    monkeypatch.setitem(app.dependency_overrides, authenticate, override)
+
+
+def test_users_never_see_each_others_cached_answers(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    providers = install(monkeypatch, fake=FakeRedis())
+    act_as_users_from_header(monkeypatch)
+
+    alice_first = post(client, headers={"X-Test-User": "1"})
+    bob_first = post(client, headers={"X-Test-User": "2"})  # same request, other user
+    alice_again = post(client, headers={"X-Test-User": "1"})
+    bob_again = post(client, headers={"X-Test-User": "2"})
+
+    assert alice_first.headers["x-cache"] == "MISS"
+    assert bob_first.headers["x-cache"] == "MISS"  # not HIT: Alice's entry is hers
+    assert alice_again.headers["x-cache"] == "HIT"
+    assert bob_again.headers["x-cache"] == "HIT"
+    assert providers["mock-1"].calls == 2  # one call per user, not one in total
+
+
+def test_a_key_with_caching_disabled_never_reads_or_writes_the_cache(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeRedis()
+    providers = install(monkeypatch, fake=fake)
+    act_as_users_from_header(monkeypatch)
+
+    first = post(client, headers={"X-Test-Cache": "off"})
+    second = post(client, headers={"X-Test-Cache": "off"})
+
+    assert first.headers["x-cache"] == second.headers["x-cache"] == "BYPASS"
+    assert providers["mock-1"].calls == 2
+    assert fake.sets == 0  # nothing was stored for this key
+
+
+def test_concurrent_identical_requests_from_different_users_do_not_coalesce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = MockProvider("shared answer", latency_s=0.2)
+    install_for_concurrency(monkeypatch, provider, FakeRedis())
+    act_as_users_from_header(monkeypatch)
+
+    async def scenario() -> list[httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as http:
+            return await asyncio.gather(
+                *[
+                    http.post(
+                        "/v1/chat/completions",
+                        json={
+                            "model": "mock-1",
+                            "messages": [{"role": "user", "content": "Hello!"}],
+                            "temperature": 0,
+                        },
+                        headers={"X-Test-User": str(user)},
+                    )
+                    for user in (1, 1, 1, 2, 2)
+                ]
+            )
+
+    responses = asyncio.run(scenario())
+
+    assert provider.calls == 2  # one shared call per user, never across users
+    outcomes = sorted(r.headers["x-cache"] for r in responses)
+    assert outcomes == ["COALESCED"] * 3 + ["MISS"] * 2

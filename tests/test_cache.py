@@ -55,11 +55,15 @@ def make_response(text: str = "cached answer") -> ChatCompletionResponse:
 
 # --- cache key -------------------------------------------------------------
 
+# --- cache key -------------------------------------------------------------
+
+USER = 1
+
 
 def test_key_is_stable_and_well_formed() -> None:
-    key = build_cache_key(make_request())
+    key = build_cache_key(make_request(), USER)
 
-    assert key == build_cache_key(make_request())
+    assert key == build_cache_key(make_request(), USER)
     assert key.startswith(KEY_PREFIX)
     assert len(key.removeprefix(KEY_PREFIX)) == 64  # SHA-256 hex digest
 
@@ -77,7 +81,13 @@ def test_key_is_stable_and_well_formed() -> None:
 def test_anything_that_shapes_the_answer_changes_the_key(
     other: ChatCompletionRequest,
 ) -> None:
-    assert build_cache_key(make_request()) != build_cache_key(other)
+    assert build_cache_key(make_request(), USER) != build_cache_key(other, USER)
+
+
+def test_different_users_never_share_a_key() -> None:
+    same_request = make_request("What is my account balance?")
+
+    assert build_cache_key(same_request, 1) != build_cache_key(same_request, 2)
 
 
 def test_message_order_and_roles_matter() -> None:
@@ -96,12 +106,12 @@ def test_message_order_and_roles_matter() -> None:
         ],
     )
 
-    assert build_cache_key(a) != build_cache_key(b)
+    assert build_cache_key(a, USER) != build_cache_key(b, USER)
 
 
 def test_key_handles_non_ascii_text() -> None:
-    assert build_cache_key(make_request("héllo 你好")) != build_cache_key(
-        make_request("hello")
+    assert build_cache_key(make_request("héllo 你好"), USER) != build_cache_key(
+        make_request("hello"), USER
     )
 
 

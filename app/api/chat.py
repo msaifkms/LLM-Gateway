@@ -3,10 +3,15 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 
+from app.api.killswitch import require_gateway_enabled
+from app.api.quota import enforce_quota
+from app.api.rate_limit import rate_limit
 from app.api.schemas import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
+from app.api.usage import get_usage_store
+from app.auth.store import Principal
 from app.core.cache import (
     ResponseCache,
     build_cache_key,
@@ -16,6 +21,8 @@ from app.core.cache import (
 from app.core.router import Router, RouteResult
 from app.core.singleflight import SingleFlight
 from app.resilience.errors import ProviderError
+from app.usage.recorder import build_event, record_usage
+from app.usage.store import UsageStore
 
 router = APIRouter(prefix="/v1")
 
@@ -42,11 +49,14 @@ def get_singleflight(request: Request) -> SingleFlight:
     response_model=ChatCompletionResponse,
 )
 async def create_chat_completion(
+    _enabled: Annotated[None, Depends(require_gateway_enabled)],
     request: ChatCompletionRequest,
     response: Response,
+    principal: Annotated[Principal, Depends(rate_limit)],
     routing: Annotated[Router, Depends(get_router)],
     cache: Annotated[ResponseCache | None, Depends(get_cache)],
     flight: Annotated[SingleFlight, Depends(get_singleflight)],
+    usage_store: Annotated[UsageStore | None, Depends(get_usage_store)],
     cache_control: Annotated[str | None, Header()] = None,
 ) -> ChatCompletionResponse:
     route = routing.get_route(request.model)
@@ -59,14 +69,22 @@ async def create_chat_completion(
     cache_key: str | None = None
     if (
         cache is not None
+        and principal.cache_enabled
         and not wants_no_store(cache_control)
         and is_cacheable(request, route)
     ):
-        cache_key = build_cache_key(request)
+        cache_key = build_cache_key(request, principal.user_id)
         cached = await cache.get(cache_key)
         if cached is not None:
             response.headers["X-Cache"] = "HIT"
+            await record_usage(
+                usage_store,
+                build_event(principal, request.model, "HIT", "cache", cached),
+            )
             return cached
+
+    # A provider is about to be paid for (cache hits returned above, free).
+    await enforce_quota(principal, usage_store)
 
     async def fetch() -> RouteResult:
         """Call the providers and, when cacheable, store the answer."""
@@ -92,11 +110,18 @@ async def create_chat_completion(
         ) from None
 
     if cache_key is None:
-        response.headers["X-Cache"] = "BYPASS"
+        cache_status = "BYPASS"
     elif is_leader:
-        response.headers["X-Cache"] = "MISS"
+        cache_status = "MISS"
     else:
-        response.headers["X-Cache"] = "COALESCED"
+        cache_status = "COALESCED"
 
+    response.headers["X-Cache"] = cache_status
     response.headers["X-Provider"] = result.provider
+    await record_usage(
+        usage_store,
+        build_event(
+            principal, request.model, cache_status, result.provider, result.response
+        ),
+    )
     return result.response
