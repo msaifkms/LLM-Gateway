@@ -152,7 +152,7 @@ def test_a_user_with_no_usage_today_has_zero(database_url: str) -> None:
 def test_set_limits_changes_and_clears_limits(database_url: str) -> None:
     async def scenario(pool: asyncpg.Pool):  # type: ignore[no-untyped-def]
         await admin.create_user(
-            pool, "alice", daily_token_limit=500, daily_usd_limit=Decimal("1")
+            pool, "alice", daily_token_limit=500, daily_usd_limit=Decimal(1)
         )
         await admin.set_limits(
             pool, "alice", rate_limit_per_min=5, daily_token_limit=None
@@ -166,7 +166,7 @@ def test_set_limits_changes_and_clears_limits(database_url: str) -> None:
 
     assert row["rate_limit_per_min"] == 5
     assert row["daily_token_limit"] is None  # removed
-    assert row["daily_usd_limit"] == Decimal("1")  # not mentioned: untouched
+    assert row["daily_usd_limit"] == Decimal(1)  # not mentioned: untouched
 
 
 def test_set_limits_rejects_unknown_users_empty_changes_and_bad_columns(
