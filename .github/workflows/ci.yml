@@ -47,7 +47,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install fastapi uvicorn httpx redis asyncpg pytest pytest-asyncio ruff mypy
+          python -m pip install fastapi uvicorn httpx redis asyncpg pytest pytest-asyncio ruff==0.17.4 mypy
 
       - name: Check code quality
         run: ruff check .
