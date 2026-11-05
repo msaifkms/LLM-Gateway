@@ -11,8 +11,10 @@ from app.auth.store import PostgresKeyStore
 from app.core.cache import ResponseCache
 from app.core.config import Settings
 from app.core.killswitch import KillSwitch, PostgresKillSwitchStore
+from app.core.logs import configure_logging
 from app.core.ratelimit import RateLimiter
 from app.core.redis_client import check_redis, create_redis
+from app.core.request_context import RequestContextMiddleware
 from app.core.router import Router
 from app.core.routes import DEFAULT_ROUTES
 from app.core.singleflight import SingleFlight
@@ -119,6 +121,9 @@ async def readiness(request: Request, response: Response) -> dict[str, str]:
         "redis": redis_status,
     }
 
+
+configure_logging()
+app.add_middleware(RequestContextMiddleware)
 
 app.include_router(chat_router)
 app.include_router(usage_router)
