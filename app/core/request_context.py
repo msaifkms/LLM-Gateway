@@ -1,4 +1,4 @@
-"""Middleware: request IDs and one summary log line per request."""
+"""Middleware: request IDs, one summary log line, and HTTP metrics."""
 
 import logging
 import re
@@ -8,12 +8,13 @@ import uuid
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from app.core import metrics
 from app.core.logs import request_id_var
 
 log = logging.getLogger("app.request")
 
 _VALID_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
-_QUIET_PATHS = {"/healthz", "/readyz"}
+_QUIET_PATHS = {"/healthz", "/readyz", "/metrics"}
 
 
 def _request_id_from(scope: Scope) -> str:
@@ -58,6 +59,7 @@ class RequestContextMiddleware:
             log.exception("unhandled error")
             raise
         finally:
+            seconds = time.perf_counter() - start
             path = scope["path"]
             if path in _QUIET_PATHS:
                 level = logging.DEBUG
@@ -69,11 +71,15 @@ class RequestContextMiddleware:
                 "method": scope["method"],
                 "path": path,
                 "status": status,
-                "duration_ms": round((time.perf_counter() - start) * 1000, 1),
+                "duration_ms": round(seconds * 1000, 1),
             }
             if cache:
                 fields["cache"] = cache
             if provider:
                 fields["provider"] = provider
             log.log(level, "request", extra={"fields": fields})
+            if path != "/metrics":
+                # The route template keeps label cardinality bounded.
+                route_label = getattr(scope.get("route"), "path", None) or "unmatched"
+                metrics.observe_request(scope["method"], route_label, status, seconds)
             request_id_var.reset(token)

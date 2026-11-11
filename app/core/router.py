@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 
 from app.api.schemas import ChatCompletionRequest, ChatCompletionResponse
+from app.core import metrics
 from app.core.routes import Route
 from app.providers.base import LLMProvider
 from app.resilience.breaker import BreakerConfig, BreakerState, CircuitBreaker
@@ -61,6 +62,10 @@ class Router:
         breaker = self._breakers.get(provider)
         return breaker.state if breaker else BreakerState.CLOSED
 
+    def breaker_states(self) -> dict[str, BreakerState]:
+        """State of every provider's breaker (closed if never used)."""
+        return {name: self.breaker_state(name) for name in self._providers}
+
     def _breaker(self, name: str) -> CircuitBreaker:
         if name not in self._breakers:
             self._breakers[name] = CircuitBreaker(
@@ -86,6 +91,7 @@ class Router:
                 last_error = exc
                 if not exc.fallback:
                     raise  # e.g. bad request: no other provider can fix it
+                metrics.FALLBACKS.labels(name).inc()
                 continue
 
             return RouteResult(
@@ -113,9 +119,19 @@ class Router:
         policy = RetryPolicy(max_retries=route.max_retries, max_total_s=remaining)
 
         async def attempt() -> ChatCompletionResponse:
-            return await breaker.call(
-                lambda: self._run_attempt(provider, name, request, timeout_s)
-            )
+            try:
+                result = await breaker.call(
+                    lambda: self._run_attempt(provider, name, request, timeout_s)
+                )
+            except ProviderError as exc:
+                # Includes "circuit open" rejections, which never reach the provider.
+                metrics.PROVIDER_ATTEMPTS.labels(name, type(exc).__name__).inc()
+                raise
+            except Exception:
+                metrics.PROVIDER_ATTEMPTS.labels(name, "unexpected").inc()
+                raise
+            metrics.PROVIDER_ATTEMPTS.labels(name, "success").inc()
+            return result
 
         return await call_with_retry(
             attempt,
@@ -132,6 +148,7 @@ class Router:
         request: ChatCompletionRequest,
         timeout_s: float,
     ) -> ChatCompletionResponse:
+        started = time.perf_counter()
         try:
             async with asyncio.timeout(timeout_s):
                 return await provider.complete(request)
@@ -140,3 +157,7 @@ class Router:
                 f"{name} exceeded the {timeout_s:.1f}s attempt timeout",
                 provider=name,
             ) from exc
+        finally:
+            metrics.PROVIDER_DURATION.labels(name).observe(
+                time.perf_counter() - started
+            )

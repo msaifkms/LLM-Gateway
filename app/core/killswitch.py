@@ -101,7 +101,8 @@ class KillSwitch:
             return
 
         if state.enabled != self._enabled:
-            logger.warning(
+            logger.log(
+                logging.WARNING if state.enabled else logging.INFO,
                 "Kill switch is now %s%s",
                 "ON" if state.enabled else "OFF",
                 f" ({state.reason})" if state.reason else "",

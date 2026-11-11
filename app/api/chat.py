@@ -12,6 +12,7 @@ from app.api.schemas import (
 )
 from app.api.usage import get_usage_store
 from app.auth.store import Principal
+from app.core import metrics
 from app.core.cache import (
     ResponseCache,
     build_cache_key,
@@ -77,6 +78,7 @@ async def create_chat_completion(
         cached = await cache.get(cache_key)
         if cached is not None:
             response.headers["X-Cache"] = "HIT"
+            metrics.CACHE_REQUESTS.labels("HIT").inc()
             await record_usage(
                 usage_store,
                 build_event(principal, request.model, "HIT", "cache", cached),
@@ -117,6 +119,7 @@ async def create_chat_completion(
         cache_status = "COALESCED"
 
     response.headers["X-Cache"] = cache_status
+    metrics.CACHE_REQUESTS.labels(cache_status).inc()
     response.headers["X-Provider"] = result.provider
     await record_usage(
         usage_store,

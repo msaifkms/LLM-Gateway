@@ -3,3 +3,4 @@ uvicorn
 httpx
 redis>=5.0.1
 asyncpg>=0.30.0
+prometheus-client

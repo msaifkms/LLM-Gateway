@@ -6,6 +6,7 @@ import httpx
 from fastapi import FastAPI, Request, Response
 
 from app.api.chat import router as chat_router
+from app.api.metrics import router as metrics_router
 from app.api.usage import router as usage_router
 from app.auth.store import PostgresKeyStore
 from app.core.cache import ResponseCache
@@ -126,4 +127,5 @@ configure_logging()
 app.add_middleware(RequestContextMiddleware)
 
 app.include_router(chat_router)
+app.include_router(metrics_router)
 app.include_router(usage_router)
