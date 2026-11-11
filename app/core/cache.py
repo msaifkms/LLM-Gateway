@@ -13,6 +13,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.api.schemas import ChatCompletionRequest, ChatCompletionResponse
+from app.core import metrics
 from app.core.routes import CacheMode, Route
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,7 @@ class ResponseCache:
         # Log once per outage, not once per request.
         if self._healthy:
             logger.warning("Redis cache unavailable; serving requests uncached")
+            metrics.REDIS_OUTAGES.labels("cache").inc()
             self._healthy = False
 
     def _mark_healthy(self) -> None:

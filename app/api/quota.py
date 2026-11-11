@@ -6,6 +6,7 @@ import asyncpg
 from fastapi import HTTPException
 
 from app.auth.store import Principal
+from app.core import metrics
 from app.usage.quota import exceeded, seconds_until_next_utc_day
 from app.usage.store import UsageStore
 
@@ -25,15 +26,18 @@ async def enforce_quota(principal: Principal, store: UsageStore | None) -> None:
     if principal.daily_token_limit is None and principal.daily_usd_limit is None:
         return
     if store is None:
+        metrics.QUOTA_REJECTIONS.labels("unavailable").inc()
         raise HTTPException(status_code=503, detail="Quota check unavailable")
 
     try:
         used = await store.usage_today(principal.user_id)
     except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError, TimeoutError):
+        metrics.QUOTA_REJECTIONS.labels("unavailable").inc()
         raise HTTPException(status_code=503, detail="Quota check unavailable") from None
 
     reached = exceeded(principal, used)
     if reached is not None:
+        metrics.QUOTA_REJECTIONS.labels(reached).inc()
         retry_after = seconds_until_next_utc_day(datetime.now(UTC))
         raise HTTPException(
             status_code=429,

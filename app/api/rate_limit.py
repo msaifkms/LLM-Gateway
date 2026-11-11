@@ -7,6 +7,7 @@ from fastapi import Depends, HTTPException, Request, Response
 
 from app.api.auth import authenticate
 from app.auth.store import Principal
+from app.core import metrics
 from app.core.ratelimit import RateLimiter, RateLimiterUnavailable
 
 
@@ -27,11 +28,13 @@ async def rate_limit(
     try:
         result = await limiter.check(principal.user_id, principal.rate_limit_per_min)
     except RateLimiterUnavailable:
+        metrics.RATE_LIMIT_EVENTS.labels("unavailable").inc()
         raise HTTPException(
             status_code=503, detail="Rate limiting is unavailable"
         ) from None
 
     if result is None:  # Redis is down and the limiter fails open
+        metrics.RATE_LIMIT_EVENTS.labels("fail_open").inc()
         return principal
 
     headers = {
@@ -39,6 +42,7 @@ async def rate_limit(
         "X-RateLimit-Remaining": str(result.remaining),
     }
     if not result.allowed:
+        metrics.RATE_LIMIT_EVENTS.labels("limited").inc()
         headers["Retry-After"] = str(max(1, math.ceil(result.retry_after_s)))
         raise HTTPException(
             status_code=429, detail="Rate limit exceeded", headers=headers

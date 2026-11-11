@@ -7,6 +7,7 @@ import asyncpg
 
 from app.api.schemas import ChatCompletionResponse
 from app.auth.store import Principal
+from app.core import metrics
 from app.usage.pricing import compute_cost
 from app.usage.store import UsageEvent, UsageStore
 
@@ -50,7 +51,17 @@ async def record_usage(store: UsageStore | None, event: UsageEvent) -> None:
 
     The provider has already answered, so failing the request now would punish the
     caller for our bookkeeping problem. The cost is an ERROR log line instead.
+    Metrics are updated first, so spend stays visible even if Postgres is down.
     """
+    metrics.observe_usage(
+        model=event.model,
+        billed=event.cache_status in BILLABLE_STATUSES,
+        prompt_tokens=event.prompt_tokens,
+        completion_tokens=event.completion_tokens,
+        cost_usd=float(event.cost_usd),
+        list_cost_usd=float(event.list_cost_usd),
+        priced=event.priced,
+    )
     if store is None:
         return
     if not event.priced:
@@ -58,4 +69,5 @@ async def record_usage(store: UsageStore | None, event: UsageEvent) -> None:
     try:
         await store.record(event)
     except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError, TimeoutError):
+        metrics.USAGE_WRITE_FAILURES.inc()
         logger.exception("Could not record usage for user %s", event.user_id)
