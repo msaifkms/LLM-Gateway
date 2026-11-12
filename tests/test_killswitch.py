@@ -153,7 +153,7 @@ def test_turning_it_on_and_off_is_logged(caplog: pytest.LogCaptureFixture) -> No
         clock.now += 5
         await switch.is_on()
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         asyncio.run(scenario())
 
     assert "now ON (provider incident)" in caplog.text
