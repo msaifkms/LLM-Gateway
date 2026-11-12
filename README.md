@@ -4,7 +4,9 @@ A backend infrastructure project that provides a unified API for interacting wit
 
 The goal is to build a reliable, observable, and scalable LLM gateway with intelligent routing, caching, authentication, rate limiting, cost tracking, and automated model evaluation.
 
-The current implementation supports OpenAI, Anthropic, and a Mock provider through one standardized endpoint. It adds priority fallback routing, retries, circuit breakers, a Redis response cache, API key authentication, per-key rate limits, daily quotas, per-request cost tracking, and a global kill switch.
+The current implementation supports OpenAI, Anthropic, and a Mock provider through one standardized endpoint. It adds priority fallback routing, retries, circuit breakers, a Redis response cache, API key authentication, per-key rate limits, daily quotas, per-request cost tracking, a global kill switch, structured logs, Prometheus metrics, and a Grafana dashboard.
+
+![LLM Gateway dashboard](docs/dashboard.png)
 
 ## Features
 
@@ -23,21 +25,25 @@ The current implementation supports OpenAI, Anthropic, and a Mock provider throu
 - Global kill switch stored in PostgreSQL
 - Admin CLI for users, keys, limits and the kill switch
 - Numbered SQL migrations
+- Structured JSON logs with a request ID on every line (`X-Request-ID`)
+- Prometheus metrics (`GET /metrics`): traffic, latency, cache, providers, breakers, rate limits, quotas, kill switch, spend and failures
+- Grafana dashboard generated from code, with Prometheus and Grafana in Docker Compose
 - Automated unit, API, fault-injection, and real-Redis/Postgres integration tests
 
 **Planned**
 
-- Observability: structured logs, metrics, tracing
 - Automated LLM evaluation harness
 - AWS infrastructure and deployment (Terraform)
 - Benchmarks and final documentation
 - Configurable routes from a YAML file
+- Distributed tracing
 
 ## Tech Stack
 
 - **Backend:** Python, FastAPI, Uvicorn, Pydantic, HTTPX
 - **Database:** PostgreSQL 16 (asyncpg)
 - **Cache and rate limiting:** Redis 7 (redis-py asyncio)
+- **Observability:** structured JSON logging, Prometheus, Grafana
 - **Infrastructure:** Docker, Docker Compose
 - **Testing:** pytest, Ruff, mypy
 - **CI:** GitHub Actions (with Redis and Postgres services), pre-commit
@@ -47,6 +53,8 @@ The current implementation supports OpenAI, Anthropic, and a Mock provider throu
 
 ```
 Client request
+   ↓
+Request ID + timing (middleware)                    → X-Request-ID, log line, metrics
    ↓
 Kill switch (Postgres flag, cached up to 2s)       → 503 if on
    ↓
@@ -79,6 +87,7 @@ Record usage and cost (Postgres) → response
 
 | Header | Meaning |
 |---|---|
+| `X-Request-ID` | ID of this request, also on every log line it produced (a valid incoming `X-Request-ID` is reused) |
 | `X-Provider` | Which provider answered |
 | `X-Cache` | `HIT`, `MISS`, `COALESCED` or `BYPASS` |
 | `X-RateLimit-Limit` / `X-RateLimit-Remaining` | The key's per-minute limit and tokens left |
@@ -106,6 +115,7 @@ Error messages shown to clients are generic and never include provider responses
 | `GET /v1/usage?days=7` | API key | Your tokens, cost, savings, by model and by UTC day (1 to 90 days) |
 | `GET /healthz` | none | Liveness (process is up) |
 | `GET /readyz` | none | Readiness (PostgreSQL reachable) |
+| `GET /metrics` | none | Prometheus metrics (aggregate counters only, no prompts or keys) |
 | `GET /docs` | none | Interactive API documentation |
 
 ## Getting Started
@@ -150,6 +160,36 @@ curl -H "Authorization: Bearer $KEY" "http://localhost:8000/v1/usage?days=7"
 
 Stop the services with `docker compose down`.
 
+## Observability
+
+Every request writes one JSON log line with its request ID, method, path, status, duration, cache outcome and provider. Prompts, keys and headers are never logged.
+
+To run Prometheus and Grafana alongside the gateway:
+
+```bash
+docker compose --profile observability up -d --build
+docker compose run --rm gateway python -m app.db.migrate
+python scripts/traffic.py --key $KEY --requests 400
+```
+
+- Grafana: http://localhost:3000 (the LLM Gateway dashboard is the home page; viewing needs no login)
+- Prometheus: http://localhost:9090 (check http://localhost:9090/targets shows the gateway as UP)
+
+Stop everything with `docker compose --profile observability down`.
+
+The dashboard is generated from `ops/grafana/build_dashboard.py`. After changing a panel, run `python ops/grafana/build_dashboard.py`. A test fails if the JSON is out of date, if a panel queries a metric that does not exist, or if a metric is missing from the dashboard.
+
+| Metric | What it shows |
+|---|---|
+| `gateway_http_requests_total`, `gateway_http_request_duration_seconds` | Traffic and latency by route template and status |
+| `gateway_cache_requests_total` | Cache outcomes |
+| `gateway_provider_attempts_total`, `gateway_provider_attempt_duration_seconds` | Provider attempts by outcome, and their latency |
+| `gateway_fallbacks_total`, `gateway_circuit_breaker_state` | Fallbacks and breaker state per provider |
+| `gateway_rate_limit_events_total`, `gateway_quota_rejections_total` | Rate-limit and quota refusals |
+| `gateway_kill_switch_on`, `gateway_kill_switch_blocks_total` | Kill switch state and blocked requests |
+| `gateway_tokens_total`, `gateway_cost_usd_total`, `gateway_cost_saved_usd_total` | Tokens and dollars billed, and dollars saved by the cache |
+| `gateway_unpriced_requests_total`, `gateway_usage_write_failures_total`, `gateway_redis_outages_total` | Missing prices, lost usage rows, Redis outages |
+
 ## Admin CLI
 
 ```bash
@@ -173,6 +213,8 @@ In Docker, prefix with `docker compose run --rm gateway`. Keys can only be creat
 | `REDIS_TIMEOUT_S` | Redis connect/command timeout | see `.env.example` |
 | `CACHE_TTL_SECONDS` | Cache entry lifetime | see `.env.example` |
 | `RATE_LIMIT_FAIL_OPEN` | Allow requests if Redis is down (`true`) or reject them with 503 (`false`) | `true` |
+| `LOG_LEVEL` | Log level | `INFO` |
+| `LOG_FORMAT` | `json` for one JSON object per line, `text` for local reading | `json` |
 | `OPENAI_API_KEY`, `OPENAI_MODEL` | OpenAI credentials and model | |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Anthropic credentials and model | |
 
@@ -197,6 +239,8 @@ TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/gateway_test \
 python -m pytest -q
 ```
 
+Next time, `docker start test-redis test-postgres` is enough. Stop them before running Docker Compose, since they use the same ports.
+
 Tests use simulated providers and fake clocks, so they cost nothing, need no network, and run in seconds.
 
 ## Development Progress
@@ -206,29 +250,30 @@ Tests use simulated providers and fake clocks, so they cost nothing, need no net
 - [x] Phase 2: Reliability, retries, fallback, and circuit breakers
 - [x] Phase 3: Redis caching
 - [x] Phase 4: Authentication, rate limiting, quotas, and cost tracking
-- [ ] Phase 5: Observability and metrics
+- [x] Phase 5: Observability and metrics
 - [ ] Phase 6: Evaluation harness
 - [ ] Phase 7: Cloud deployment
 - [ ] Phase 8: Benchmarking and final documentation
 
 ## Project Status
 
-**Phase 4 complete.**
+**Phase 5 complete.**
 
-The gateway authenticates callers, limits their rate and daily spend, records every paid call with its cost, and can be shut off instantly. All of it is covered by unit tests and by integration tests against real Redis and PostgreSQL.
+Every request can be followed through the logs by its request ID, and the gateway's traffic, latency, cache efficiency, provider health, protections and spend are visible as Prometheus metrics and on a Grafana dashboard.
 
 **Current limitations**
 
 - Routes are defined in code rather than a configuration file.
 - Circuit breaker and single-flight state live in process memory and are not shared between gateway instances.
+- Metrics are per process: with several gateway instances, Prometheus must scrape each one.
+- `/metrics` has no authentication. It holds only aggregate counters, but should not be exposed to the internet in a deployment.
 - Rate limits need Redis; without Redis there are none.
 - Quotas are soft: a request is checked before it runs, so a user can overshoot by one request or one concurrent burst.
 - The kill switch needs PostgreSQL, takes up to 2 seconds to propagate, and does not cancel requests already in flight.
-- Prices are kept in code (`app/usage/pricing.py`). Models not in the table are recorded as unpriced with cost 0 and a warning. Verify the prices against the providers' pricing pages before relying on them.
+- Prices are kept in code (`app/usage/pricing.py`). Verify them against the providers' pricing pages before relying on them.
 - Savings figures assume a cached answer would have cost the same as the original call.
-- Anthropic prompt-cache pricing is not modeled.
 - Anthropic's current API version does not accept `temperature`, so Anthropic answers are never cached.
-- The cache TTL is global, and a hanging Redis can add about one second to a cacheable request.
+- No distributed tracing yet.
 - Only text-based, non-streaming chat completions are supported.
 
 This project is under active development and is not yet intended for production use.
