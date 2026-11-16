@@ -72,9 +72,17 @@ def test_migrations_create_tables_and_are_idempotent(database_url: str) -> None:
         "001_users_and_api_keys",
         "002_usage_events",
         "003_gateway_flags",
+        "004_eval_runs",
     ]
     assert second == []  # already applied: nothing to do
-    assert {"users", "api_keys", "usage_events", "gateway_flags"} <= tables
+    assert {
+        "users",
+        "api_keys",
+        "usage_events",
+        "gateway_flags",
+        "eval_runs",
+        "eval_results",
+    } <= tables
 
 
 def test_two_instances_migrating_at_once_apply_each_file_once(
@@ -94,7 +102,12 @@ def test_two_instances_migrating_at_once_apply_each_file_once(
 
     assert sorted(results) == [
         [],
-        ["001_users_and_api_keys", "002_usage_events", "003_gateway_flags"],
+        [
+            "001_users_and_api_keys",
+            "002_usage_events",
+            "003_gateway_flags",
+            "004_eval_runs",
+        ],
     ]
 
 
