@@ -1,0 +1,6 @@
+{"id": "exact-reply", "prompt": "Say hello.", "expected": "Hello from the Mock LLM!", "scorer": "exact", "tags": ["smoke"]}
+{"id": "normalized-reply", "prompt": "Say hello again.", "expected": "hello from the mock llm", "scorer": "normalized", "tags": ["smoke"]}
+{"id": "keywords-all", "prompt": "Who are you?", "expected": ["hello", "mock"], "scorer": "contains", "tags": ["smoke"]}
+{"id": "keywords-any", "prompt": "Greet me.", "expected": ["howdy", "hello"], "scorer": "contains", "options": {"mode": "any"}, "tags": ["smoke"]}
+{"id": "regex-shape", "prompt": "Introduce yourself.", "expected": "^Hello from the \\w+ LLM!$", "scorer": "regex", "options": {"full_match": true}, "tags": ["smoke"]}
+{"id": "messages-format", "messages": [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello."}, {"role": "user", "content": "Hi again"}], "expected": "Hello from the Mock LLM!", "scorer": "exact", "max_tokens": 20, "tags": ["smoke", "messages"]}
