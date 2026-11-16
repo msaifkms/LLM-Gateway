@@ -11,6 +11,7 @@ from decimal import Decimal
 import asyncpg
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 from app.api.auth import authenticate
 from app.auth import admin
@@ -232,7 +233,7 @@ def test_an_eval_runs_through_the_real_gateway_and_is_billed_like_traffic(
     database_url: str,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Real auth, rate limiting (with Redis), usage rows and stored results."""
+    """Real auth, rate limiting (with Redis), usage rows, stored results, /metrics."""
 
     async def setup(pool: asyncpg.Pool) -> str:
         await admin.create_user(pool, "evals", rate_limit_per_min=600)
@@ -287,3 +288,7 @@ def test_an_eval_runs_through_the_real_gateway_and_is_billed_like_traffic(
         assert usage.get("MISS", 0) + usage.get("HIT", 0) == 6
     else:
         assert usage == {"BYPASS": 12}  # no Redis: nothing is cached
+
+    with TestClient(app) as client:
+        body = client.get("/metrics").text
+    assert 'gateway_eval_pass_rate{dataset="mock_smoke",model="mock-1"} 1.0' in body

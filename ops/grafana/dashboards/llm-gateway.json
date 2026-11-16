@@ -744,7 +744,7 @@
     },
     {
       "type": "row",
-      "title": "Failures",
+      "title": "Answer quality (evals)",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -757,6 +757,162 @@
     },
     {
       "type": "timeseries",
+      "title": "Eval pass rate (latest run)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 9,
+        "x": 0,
+        "y": 49
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "gateway_eval_pass_rate",
+          "legendFormat": "{{dataset}} {{model}}"
+        }
+      ],
+      "id": 21
+    },
+    {
+      "type": "timeseries",
+      "title": "Eval mean score (latest run)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 9,
+        "x": 9,
+        "y": 49
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "gateway_eval_mean_score",
+          "legendFormat": "{{dataset}} {{model}}"
+        }
+      ],
+      "id": 22
+    },
+    {
+      "type": "stat",
+      "title": "Hours since last eval",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 49
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "h",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 24
+              },
+              {
+                "color": "red",
+                "value": 168
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(time() - max(gateway_eval_last_run_timestamp_seconds)) / 3600",
+          "legendFormat": ""
+        }
+      ],
+      "id": 23
+    },
+    {
+      "type": "row",
+      "title": "Failures",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 57
+      },
+      "panels": [],
+      "id": 24
+    },
+    {
+      "type": "timeseries",
       "title": "Fallbacks",
       "datasource": {
         "type": "prometheus",
@@ -766,7 +922,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 49
+        "y": 58
       },
       "fieldConfig": {
         "defaults": {
@@ -794,7 +950,7 @@
           "legendFormat": "{{provider}}"
         }
       ],
-      "id": 21
+      "id": 25
     },
     {
       "type": "timeseries",
@@ -807,7 +963,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 49
+        "y": 58
       },
       "fieldConfig": {
         "defaults": {
@@ -844,7 +1000,7 @@
           "legendFormat": "usage writes"
         }
       ],
-      "id": 22
+      "id": 26
     },
     {
       "type": "timeseries",
@@ -857,7 +1013,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 49
+        "y": 58
       },
       "fieldConfig": {
         "defaults": {
@@ -885,7 +1041,7 @@
           "legendFormat": "{{model}}"
         }
       ],
-      "id": 23
+      "id": 27
     }
   ],
   "templating": {

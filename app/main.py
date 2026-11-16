@@ -20,6 +20,8 @@ from app.core.router import Router
 from app.core.routes import DEFAULT_ROUTES
 from app.core.singleflight import SingleFlight
 from app.db.pool import check_db, create_db_pool
+from app.evals.scoreboard import EvalScoreboard
+from app.evals.store import PostgresEvalStore
 from app.providers.registry import build_providers
 from app.usage.store import PostgresUsageStore
 
@@ -46,6 +48,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.usage_store = PostgresUsageStore(db) if db is not None else None
         app.state.kill_switch = (
             KillSwitch(PostgresKillSwitchStore(db)) if db is not None else None
+        )
+        app.state.eval_scoreboard = (
+            EvalScoreboard(PostgresEvalStore(db)) if db is not None else None
         )
 
         redis = (

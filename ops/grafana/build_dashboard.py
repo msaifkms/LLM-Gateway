@@ -253,6 +253,38 @@ LAYOUT: list[list[Panel]] = [
             ],
         ),
     ],
+    [row("Answer quality (evals)")],
+    [
+        graph(
+            "Eval pass rate (latest run)",
+            [("gateway_eval_pass_rate", "{{dataset}} {{model}}")],
+            "percentunit",
+            width=9,
+        ),
+        graph(
+            "Eval mean score (latest run)",
+            [("gateway_eval_mean_score", "{{dataset}} {{model}}")],
+            "percentunit",
+            width=9,
+        ),
+        {
+            **stat(
+                "Hours since last eval",
+                "(time() - max(gateway_eval_last_run_timestamp_seconds)) / 3600",
+                "h",
+                decimals=1,
+                thresholds={
+                    "mode": "absolute",
+                    "steps": [
+                        {"color": "green", "value": None},
+                        {"color": "orange", "value": 24},
+                        {"color": "red", "value": 168},
+                    ],
+                },
+            ),
+            "gridPos": {"h": 8, "w": 6},
+        },
+    ],
     [row("Failures")],
     [
         graph(
