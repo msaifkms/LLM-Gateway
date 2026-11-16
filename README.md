@@ -4,7 +4,7 @@ A backend infrastructure project that provides a unified API for interacting wit
 
 The goal is to build a reliable, observable, and scalable LLM gateway with intelligent routing, caching, authentication, rate limiting, cost tracking, and automated model evaluation.
 
-The current implementation supports OpenAI, Anthropic, and a Mock provider through one standardized endpoint. It adds priority fallback routing, retries, circuit breakers, a Redis response cache, API key authentication, per-key rate limits, daily quotas, per-request cost tracking, a global kill switch, structured logs, Prometheus metrics, and a Grafana dashboard.
+The current implementation supports OpenAI, Anthropic, and a Mock provider through one standardized endpoint. It adds priority fallback routing, retries, circuit breakers, a Redis response cache, API key authentication, per-key rate limits, daily quotas, per-request cost tracking, a global kill switch, structured logs, Prometheus metrics, a Grafana dashboard, and an evaluation harness that measures answer quality through the gateway's own API.
 
 ![LLM Gateway dashboard](docs/dashboard.png)
 
@@ -28,11 +28,11 @@ The current implementation supports OpenAI, Anthropic, and a Mock provider throu
 - Structured JSON logs with a request ID on every line (`X-Request-ID`)
 - Prometheus metrics (`GET /metrics`): traffic, latency, cache, providers, breakers, rate limits, quotas, kill switch, spend and failures
 - Grafana dashboard generated from code, with Prometheus and Grafana in Docker Compose
-- Automated unit, API, fault-injection, and real-Redis/Postgres integration tests
+- Evaluation harness (`python -m app.evals`): JSONL datasets, six scorers including LLM-as-judge, runs stored in PostgreSQL, multi-model side-by-side reports, run comparison with regression flags, Markdown reports, and eval scores on the dashboard
+- Automated unit, API, fault-injection, and real-Redis/Postgres integration tests, plus an end-to-end eval run against the Mock provider in CI
 
 **Planned**
 
-- Automated LLM evaluation harness
 - AWS infrastructure and deployment (Terraform)
 - Benchmarks and final documentation
 - Configurable routes from a YAML file
@@ -189,6 +189,28 @@ The dashboard is generated from `ops/grafana/build_dashboard.py`. After changing
 | `gateway_kill_switch_on`, `gateway_kill_switch_blocks_total` | Kill switch state and blocked requests |
 | `gateway_tokens_total`, `gateway_cost_usd_total`, `gateway_cost_saved_usd_total` | Tokens and dollars billed, and dollars saved by the cache |
 | `gateway_unpriced_requests_total`, `gateway_usage_write_failures_total`, `gateway_redis_outages_total` | Missing prices, lost usage rows, Redis outages |
+| `gateway_eval_pass_rate`, `gateway_eval_mean_score`, `gateway_eval_last_run_timestamp_seconds` | Answer quality: the latest completed eval run per dataset and model (read from PostgreSQL at scrape time, at most every 30 seconds) |
+
+## Evaluation Harness
+
+The harness sends each case in a dataset through `POST /v1/chat/completions` with an ordinary API key, so evals go through auth, rate limits, quotas, the cache and cost tracking like real traffic. It scores each answer, stores the run and every result in PostgreSQL, and prints a report.
+
+```bash
+export EVAL_API_KEY=llmgw_...        # a key from "app.cli issue-key"
+python -m app.evals validate
+python -m app.evals run --dataset factual_qa --model openai-default --model anthropic-default \
+    --judge-model openai-default --no-cache --markdown docs/evals/
+python -m app.evals compare 5 6 --fail-on-regression
+```
+
+In Docker: `docker compose run --rm evals run --dataset mock_smoke --model mock-1`.
+
+- **Datasets:** JSONL, one case per line (an id, a prompt or messages, an expected answer or rubric, a scorer, and tags), validated with line-numbered errors before anything is sent. The starter sets are `factual_qa`, `instruction_following` and `json_output` (27 cases), plus `mock_smoke` for CI.
+- **Scorers:** `exact`, `normalized`, `contains`, `regex`, `json` (with required keys and values), and `judge` (a judge model, called through the gateway, rates the answer 1 to 5 against a rubric and gives a reason). New scorers are a subclass and a `register()` call.
+- **Reports:** pass rate, mean score, p50 and p95 latency, tokens, cost (answers and judge separately) and errors, per case and side by side for several models. `compare` flags regressed cases between two runs.
+- **CI:** every push runs `mock_smoke` against a real gateway process with a real key and fails the build below a 100% pass rate.
+
+Format, scorers, flags and sample reports from real providers: [docs/evals/README.md](docs/evals/README.md).
 
 ## Admin CLI
 
@@ -216,6 +238,7 @@ In Docker, prefix with `docker compose run --rm gateway`. Keys can only be creat
 | `LOG_LEVEL` | Log level | `INFO` |
 | `LOG_FORMAT` | `json` for one JSON object per line, `text` for local reading | `json` |
 | `OPENAI_API_KEY`, `OPENAI_MODEL` | OpenAI credentials and model | |
+| `EVAL_API_KEY`, `GATEWAY_URL` | Eval CLI: the gateway API key to use, and where the gateway is | `GATEWAY_URL`: `http://localhost:8000` |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Anthropic credentials and model | |
 
 ## Run Tests
@@ -241,7 +264,7 @@ python -m pytest -q
 
 Next time, `docker start test-redis test-postgres` is enough. Stop them before running Docker Compose, since they use the same ports.
 
-Tests use simulated providers and fake clocks, so they cost nothing, need no network, and run in seconds.
+Tests use simulated providers and fake clocks, so they cost nothing, need no network, and run in seconds. The eval tests drive the real app in-process with the Mock provider.
 
 ## Development Progress
 
@@ -251,15 +274,15 @@ Tests use simulated providers and fake clocks, so they cost nothing, need no net
 - [x] Phase 3: Redis caching
 - [x] Phase 4: Authentication, rate limiting, quotas, and cost tracking
 - [x] Phase 5: Observability and metrics
-- [ ] Phase 6: Evaluation harness
+- [x] Phase 6: Evaluation harness
 - [ ] Phase 7: Cloud deployment
 - [ ] Phase 8: Benchmarking and final documentation
 
 ## Project Status
 
-**Phase 5 complete.**
+**Phase 6 complete.**
 
-Every request can be followed through the logs by its request ID, and the gateway's traffic, latency, cache efficiency, provider health, protections and spend are visible as Prometheus metrics and on a Grafana dashboard.
+Earlier phases measured speed, cost and reliability. The evaluation harness adds answer quality: datasets run through the gateway like real traffic, are scored (including by an LLM judge), and are stored, compared and charted. A run that gets worse than an earlier one is flagged case by case.
 
 **Current limitations**
 
@@ -274,6 +297,9 @@ Every request can be followed through the logs by its request ID, and the gatewa
 - Savings figures assume a cached answer would have cost the same as the original call.
 - Anthropic's current API version does not accept `temperature`, so Anthropic answers are never cached.
 - No distributed tracing yet.
+- The Mock provider always gives the same reply and reports 0 tokens, so real quality, token and cost numbers need OpenAI or Anthropic keys.
+- An LLM judge can be wrong or inconsistent. Its rubric scores are a signal, not ground truth, and a judge reply that isn't valid JSON counts as a scoring error.
+- Eval results stored in PostgreSQL include each model's answers (but never API keys or headers), so don't put sensitive data in eval datasets.
 - Only text-based, non-streaming chat completions are supported.
 
 This project is under active development and is not yet intended for production use.
