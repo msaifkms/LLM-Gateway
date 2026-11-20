@@ -40,6 +40,7 @@ flowchart LR
 - [9. Logs](#9-logs)
 - [Other admin commands](#other-admin-commands)
 - [Later deploys](#later-deploys)
+- [Results from a live run](#results-from-a-live-run)
 - [Estimated cost](#estimated-cost)
 - [Tear everything down](#tear-everything-down)
 - [Turning on CI deploys](#turning-on-ci-deploys)
@@ -277,6 +278,22 @@ Commit, then run `infra/scripts/deploy.sh` again. A commit that is already in EC
 
 The service ignores Terraform's task definition after it is created, so a Terraform apply never rolls the service back to an older image. If you change something in Terraform that affects the task (environment, secrets, sizes, `enable_redis`), apply it, then run `deploy.sh`. The deploy copies the newest revision, which is Terraform's, and swaps in the image.
 
+## Results from a live run
+
+Every step of this guide was run in `us-east-2` on 2026-11-20 on the AWS free plan, with the Mock provider only (no real provider keys). No step was blocked by the plan's service control policy.
+
+| Step | What happened |
+|---|---|
+| 1. Bootstrap | 7 resources (bucket, versioning, encryption, public access block, TLS-only policy, lifecycle, ownership) |
+| 2. Plan | 42 to add, 0 to change, 0 to destroy. No NAT Gateway, Redis or OIDC; load balancer ingress limited to one IP |
+| 3. Apply | 42 resources created; RDS took 9 minutes and the load balancer 3 |
+| 4. First deploy | Image built for `linux/arm64` and pushed with the commit SHA as its tag, task definition revision 2 registered, migrations `001` to `004` applied by a one-off task, service stable on the new revision, `/healthz` OK through the load balancer |
+| 5. Migrations | `Database is up to date.` |
+| 6. User and key | `Created user 'demo' (id 1).` Then `issue-key --to-ssm` printed only `Key id : 1` and the parameter name. The key was read once and the parameter deleted. A search of the whole `/ecs/llm-gateway` log group for the key found 0 matches |
+| 7. Smoke test | `/healthz` → `{"status":"ok"}`; `/readyz` → `{"status":"ready","postgres":"ok","redis":"disabled"}`; `/metrics` and `/metrics/` → 404 from the load balancer; no key → 401; Mock chat → 200 with `X-Provider: mock-1` and `X-Cache: BYPASS`; `/v1/usage` showed the request |
+| 8. Eval | `mock_smoke` on `mock-1`: 6/6 passed, mean score 1.000, p50 73 ms, p95 97 ms, $0 |
+| 9. Teardown | 42 resources destroyed (the service and internet gateway took about 3.5 minutes each), task definitions deregistered and deleted, the bootstrap's 7 resources destroyed. RDS's automated daily snapshot disappeared on its own about 4.5 minutes later. After that, `leftovers.sh` found nothing except stale tagging-API entries for deleted resources, and each of those was confirmed gone directly |
+
 ## Estimated cost
 
 On-demand prices for `us-east-2`, which match `us-east-1` for these services, with the defaults (one task, no Redis) and almost no traffic. These are estimates: check the AWS pricing pages, and note that free plan credits may cover some of it.
@@ -321,7 +338,9 @@ terraform -chdir=infra/bootstrap destroy
 infra/scripts/leftovers.sh
 ```
 
-`leftovers.sh` is read-only. It checks for anything tagged `project=llm-gateway` and, by name, for clusters, task definitions, ECR repositories, load balancers, RDS instances and snapshots, ElastiCache, SSM parameters, the RDS-managed secret, log groups, VPCs, Elastic IPs, network interfaces and state buckets. It prints `nothing left for llm-gateway in us-east-2` when the account is clean. The tagging API can list deleted resources for a few minutes after a destroy, so run it again if something shows up that `terraform destroy` reported as gone. The last check of billing is the Billing console's "Bills" page for the current month, a day later.
+RDS takes its first automated backup right after the database is created. With `delete_automated_backups = true`, that snapshot is removed together with the instance, but asynchronously: in the live run it was still listed for about 4.5 minutes after the destroy finished. Automated snapshots cannot be deleted by hand, so if `leftovers.sh` lists one, wait a few minutes and run it again.
+
+`leftovers.sh` is read-only. It checks for anything tagged `project=llm-gateway` and, by name, for clusters, task definitions, ECR repositories, load balancers, RDS instances and snapshots, ElastiCache, SSM parameters, the RDS-managed secret, log groups, VPCs, Elastic IPs, network interfaces and state buckets. It prints `nothing left for llm-gateway in us-east-2` when the account is clean. The tagging API can keep listing deleted resources (ECS tasks, the INACTIVE cluster and service, security group rules) for hours after a destroy. Check one directly, for example `aws ec2 describe-security-groups --group-ids <id>` (which then reports `InvalidGroup.NotFound`). An INACTIVE ECS cluster or service costs nothing. The last check of billing is the Billing console's "Bills" page for the current month, a day later.
 
 RDS deletes the secret it manages together with the database, and `skip_final_snapshot = true` means no snapshot is left behind.
 

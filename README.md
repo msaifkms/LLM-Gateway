@@ -401,6 +401,22 @@ terraform -chdir=infra destroy                         # when done
 
 **Deploys are manual.** The project's AWS account is on the AWS free plan, whose service control policy denies the IAM actions for GitHub's OIDC provider. Without OIDC, GitHub Actions could only deploy with long-lived AWS keys, which this project does not store. So `infra/scripts/deploy.sh` runs from a laptop. The CI `deploy` job runs only once a deploy role is configured, and otherwise skips itself. The Terraform for the OIDC role is included behind `enable_github_oidc` for accounts that allow it.
 
+### Results from a live run
+
+One full run in `us-east-2` on 2026-11-20, with the Mock provider only:
+
+| Step | Result |
+|---|---|
+| `terraform apply` | 42 resources created in about 10 minutes (RDS took 9) |
+| `deploy.sh` | ARM64 image built and pushed, 4 migrations applied in a one-off task, service stable, `/healthz` OK through the load balancer |
+| `issue-key --to-ssm` | Key stored as a SecureString, read once and deleted; a search of all gateway logs found the key 0 times |
+| `/healthz`, `/readyz` | `ok`; `ready` with `postgres: ok`, `redis: disabled` |
+| `/metrics`, `/metrics/` | 404, answered by the load balancer |
+| Chat request without a key | 401 |
+| Chat request through the Mock | 200, `X-Provider: mock-1`, `X-Cache: BYPASS`, and the request appears in `/v1/usage` |
+| `mock_smoke` eval through the load balancer | 6/6 passed, p50 latency 73 ms, p95 97 ms |
+| `terraform destroy` (both configs) | 42 + 7 resources destroyed; `leftovers.sh` then found no billable resources |
+
 With the defaults (one task, no Redis), it costs about $0.07 an hour, $1.65 a day or $49 a month. The NAT Gateway, usually the largest hidden cost, is avoided on purpose: [docs/deploy.md](docs/deploy.md#design-decisions) explains the trade-off.
 
 ## Run Tests
@@ -460,7 +476,7 @@ The integration tests reset the `gateway_test` database, so run this after them,
 - [x] Phase 4: Authentication, rate limiting, quotas, and cost tracking
 - [x] Phase 5: Observability and metrics
 - [x] Phase 6: Evaluation harness
-- [ ] Phase 7: Cloud deployment (infrastructure and tooling done; live run pending)
+- [x] Phase 7: Cloud deployment
 - [ ] Phase 8: Benchmarking and final documentation
 
 ## Project Status
@@ -469,7 +485,7 @@ The integration tests reset the `gateway_test` database, so run this after them,
 
 Earlier phases made the gateway fast, cheap to run, reliable and observable. Phase 6 adds a way to measure answer quality: datasets of questions run through the gateway like real traffic, every answer is scored by rule or by an LLM judge, and the results are stored, reported, compared run against run, and charted on the dashboard. A model or setting that makes answers worse shows up as flagged cases, and CI fails the build if the harness itself breaks.
 
-**Phase 7 in progress.** The AWS infrastructure is defined in Terraform and passes `fmt`, `validate` and `tflint` in CI. The hardened image and the deploy and admin-task scripts are done. The live deployment to AWS is next.
+**Phase 7 complete.** The gateway runs on AWS: ECS Fargate behind a load balancer, with RDS PostgreSQL, all defined in Terraform. It was deployed, tested and destroyed on the same day, and a check afterwards found nothing left in the account. See [Deployment](#deployment).
 
 **Current limitations**
 
@@ -477,7 +493,7 @@ Earlier phases made the gateway fast, cheap to run, reliable and observable. Pha
 - Circuit breaker and single-flight state live in process memory and are not shared between gateway instances.
 - Metrics are per process: with several gateway instances, Prometheus must scrape each one.
 - `/metrics` has no authentication. It holds only aggregate counters. The AWS load balancer answers it with a 404, so it is not reachable from the internet there, and nothing in AWS scrapes it.
-- The AWS deployment serves plain HTTP unless an ACM certificate is configured, runs one task by default, and is deployed from a laptop. [docs/deploy.md](docs/deploy.md#limitations) lists its limitations.
+- The AWS deployment serves plain HTTP unless an ACM certificate is configured, runs one task by default, and is deployed from a laptop, because the AWS free plan blocks GitHub OIDC. [docs/deploy.md](docs/deploy.md#limitations) lists its limitations.
 - Rate limits need Redis; without Redis there are none.
 - Quotas are soft: a request is checked before it runs, so a user can overshoot by one request or one concurrent burst.
 - The kill switch needs PostgreSQL, takes up to 2 seconds to propagate, and does not cancel requests already in flight.
