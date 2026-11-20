@@ -1,6 +1,7 @@
 """Prometheus metrics for the gateway, in one dedicated registry."""
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING
 
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -13,6 +14,9 @@ from prometheus_client import (
 )
 
 from app.resilience.breaker import BreakerState
+
+if TYPE_CHECKING:  # a runtime import would be circular (evals use usage metrics)
+    from app.evals.store import LatestScore
 
 CONTENT_TYPE = CONTENT_TYPE_LATEST
 
@@ -129,6 +133,27 @@ REDIS_OUTAGES = Counter(
     registry=REGISTRY,
 )
 
+# Answer quality, from the latest stored eval runs (read at scrape time).
+
+EVAL_PASS_RATE = Gauge(
+    "gateway_eval_pass_rate",
+    "Pass rate (0-1) of the latest completed eval run, by dataset and model.",
+    ["dataset", "model"],
+    registry=REGISTRY,
+)
+EVAL_MEAN_SCORE = Gauge(
+    "gateway_eval_mean_score",
+    "Mean score (0-1) of the latest completed eval run, by dataset and model.",
+    ["dataset", "model"],
+    registry=REGISTRY,
+)
+EVAL_LAST_RUN = Gauge(
+    "gateway_eval_last_run_timestamp_seconds",
+    "Unix time the latest completed eval run finished, by dataset and model.",
+    ["dataset", "model"],
+    registry=REGISTRY,
+)
+
 _STATE_VALUES = {"CLOSED": 0, "HALF_OPEN": 1, "OPEN": 2}
 
 
@@ -164,6 +189,17 @@ def observe_usage(
             UNPRICED.labels(model).inc()
     else:
         SAVED_USD.labels(model).inc(list_cost_usd)
+
+
+def update_eval_scores(scores: Iterable["LatestScore"]) -> None:
+    """Replace every eval series, so a dataset that stopped running disappears."""
+    for gauge in (EVAL_PASS_RATE, EVAL_MEAN_SCORE, EVAL_LAST_RUN):
+        gauge.clear()
+    for score in scores:
+        labels = (score.dataset, score.model)
+        EVAL_PASS_RATE.labels(*labels).set(score.pass_rate)
+        EVAL_MEAN_SCORE.labels(*labels).set(score.mean_score)
+        EVAL_LAST_RUN.labels(*labels).set(score.finished_at.timestamp())
 
 
 def render() -> bytes:

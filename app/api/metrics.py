@@ -21,4 +21,10 @@ async def metrics_endpoint(request: Request) -> Response:
         with contextlib.suppress(KillSwitchUnavailable):
             metrics.KILL_SWITCH_ON.set(1 if await switch.is_on() else 0)
 
+    scoreboard = getattr(request.app.state, "eval_scoreboard", None)
+    if scoreboard is not None:
+        scores = await scoreboard.latest()
+        if scores is not None:  # never read yet: show nothing rather than zeros
+            metrics.update_eval_scores(scores)
+
     return Response(metrics.render(), media_type=metrics.CONTENT_TYPE)

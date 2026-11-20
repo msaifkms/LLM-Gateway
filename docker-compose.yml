@@ -20,6 +20,21 @@ services:
       redis:
         condition: service_healthy
 
+  # The eval CLI, on the same network as the gateway. Reports land in docs/evals/.
+  #   EVAL_API_KEY=llmgw_... docker compose run --rm evals run --dataset mock_smoke --model mock-1
+  evals:
+    build: .
+    profiles: ["evals"]
+    entrypoint: ["python", "-m", "app.evals"]
+    environment:
+      DATABASE_URL: postgresql://gateway:local_dev_only@postgres:5432/gateway
+      GATEWAY_URL: http://gateway:8000
+      EVAL_API_KEY: ${EVAL_API_KEY:-}
+    volumes:
+      - ./docs/evals:/app/docs/evals
+    depends_on:
+      - gateway
+
   postgres:
     image: postgres:16
     environment:

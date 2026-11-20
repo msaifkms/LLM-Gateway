@@ -50,10 +50,38 @@ jobs:
           python -m pip install fastapi uvicorn httpx redis asyncpg pytest pytest-asyncio prometheus-client ruff==0.17.4 mypy
 
       - name: Check code quality
-        run: ruff check .
+        run: |
+          ruff check .
+          ruff format --check .
 
       - name: Check types
         run: mypy app
 
       - name: Run tests
         run: python -m pytest
+
+      # The eval harness, end to end: a real gateway process, a real API key,
+      # every request through auth, rate limits and usage tracking. The Mock
+      # provider answers, so this costs nothing and is deterministic.
+      - name: Run the eval harness against the Mock provider
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gateway_test
+          REDIS_URL: redis://localhost:6379/14
+        run: |
+          python -m app.evals validate
+          python -m app.db.migrate
+          uvicorn app.main:app --port 8000 > gateway.log 2>&1 &
+          for _ in $(seq 30); do curl -sf localhost:8000/readyz && break; sleep 1; done
+          python -m app.cli create-user ci-evals --rate-limit 600
+          EVAL_API_KEY=$(python -m app.cli issue-key ci-evals | awk '$1 == "Key" && $2 == ":" {print $3}')
+          echo "::add-mask::$EVAL_API_KEY"
+          export EVAL_API_KEY
+          python -m app.evals run --dataset mock_smoke --model mock-1 --model chat-test \
+            --no-cache --min-pass-rate 1 --markdown eval-report
+          python -m app.evals compare 1 2 --fail-on-regression
+          curl -sf localhost:8000/metrics | grep 'gateway_eval_pass_rate{dataset="mock_smoke"'
+          cat eval-report/*.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show the gateway log
+        if: failure()
+        run: cat gateway.log || true
