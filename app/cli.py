@@ -2,6 +2,7 @@
 
     python -m app.cli create-user alice --rate-limit 30
     python -m app.cli issue-key alice --label laptop
+    python -m app.cli issue-key alice --to-ssm /llm-gateway/keys/alice
     python -m app.cli revoke-key 3
     python -m app.cli list-keys
     python -m app.cli set-limits alice --daily-tokens 200000 --daily-usd none
@@ -19,7 +20,7 @@ from decimal import Decimal, InvalidOperation
 
 import asyncpg
 
-from app.auth import admin
+from app.auth import admin, ssm
 from app.core.config import Settings
 from app.core.killswitch import PostgresKillSwitchStore
 from app.db.pool import create_db_pool
@@ -49,6 +50,13 @@ def positive_decimal(text: str) -> Decimal:
 CLEAR = object()
 
 
+def ssm_parameter_name(text: str) -> str:
+    try:
+        return ssm.validate_parameter_name(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"bad SSM parameter name: {exc}") from None
+
+
 def int_or_none(text: str) -> object:
     return CLEAR if text.strip().lower() == "none" else positive_int(text)
 
@@ -76,6 +84,13 @@ def build_parser() -> argparse.ArgumentParser:
     issue.add_argument("--label", default="", help="a note, e.g. 'laptop'")
     issue.add_argument(
         "--no-cache", action="store_true", help="never cache this key's requests"
+    )
+    issue.add_argument(
+        "--to-ssm",
+        metavar="PARAMETER",
+        type=ssm_parameter_name,
+        help="store the key as an SSM SecureString with this name instead of "
+        "printing it (for runs whose output is logged, e.g. in the cloud)",
     )
 
     revoke = commands.add_parser("revoke-key", help="revoke an API key by id")
@@ -118,6 +133,9 @@ async def run_command(args: argparse.Namespace, pool: asyncpg.Pool) -> None:
         issued = await admin.issue_key(
             pool, args.user, label=args.label, cache_enabled=not args.no_cache
         )
+        if args.to_ssm:
+            await store_key_in_ssm(pool, args, issued)
+            return
         print(f"Key id : {issued.key_id}")
         print(f"User   : {args.user}")
         print(f"Key    : {issued.plaintext}")
@@ -160,6 +178,39 @@ async def run_command(args: argparse.Namespace, pool: asyncpg.Pool) -> None:
                 f"{row['id']:>4}  {row['user_name']:<16} {row['key_prefix']:<12} "
                 f"{status:<8} {cache:<9} {row['label']}"
             )
+
+
+async def store_key_in_ssm(
+    pool: asyncpg.Pool, args: argparse.Namespace, issued: admin.IssuedKey
+) -> None:
+    """Put the new key in SSM and print where it is, never the key itself.
+
+    If it cannot be stored, the key is revoked: nobody has seen it, so leaving it
+    active would only leave a valid credential that no one can account for.
+    """
+    name = args.to_ssm
+    try:
+        await asyncio.to_thread(
+            ssm.put_secure_parameter,
+            name,
+            issued.plaintext,
+            description=f"LLM Gateway API key {issued.key_id} for user {args.user}",
+        )
+    except ssm.KeyStorageError as exc:
+        await admin.revoke_key(pool, issued.key_id)
+        raise admin.AdminError(
+            f"{exc}. Key {issued.key_id} was revoked, so no unread key stays active."
+        ) from None
+
+    print(f"Key id    : {issued.key_id}")
+    print(f"User      : {args.user}")
+    print(f"Stored in : SSM SecureString {name}")
+    print("Read it once, then delete the parameter:")
+    print(
+        f"  aws ssm get-parameter --name {name} --with-decryption "
+        "--query Parameter.Value --output text"
+    )
+    print(f"  aws ssm delete-parameter --name {name}")
 
 
 async def run(args: argparse.Namespace, database_url: str) -> int:
