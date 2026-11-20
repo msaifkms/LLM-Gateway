@@ -25,6 +25,7 @@ from app.db.pool import check_db, create_db_pool
 from app.evals.scoreboard import EvalScoreboard
 from app.evals.store import PostgresEvalStore
 from app.providers.registry import build_providers
+from app.ui import install as install_ui
 from app.usage.store import PostgresUsageStore
 
 
@@ -140,3 +141,4 @@ app.include_router(metrics_router)
 app.include_router(usage_router)
 app.include_router(models_router)
 app.include_router(evals_router)
+install_ui(app)
