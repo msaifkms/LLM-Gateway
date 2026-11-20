@@ -1,0 +1,23 @@
+# Development and CI: the runtime set plus test, lint and type-check tools.
+#   python -m pip install -r requirements-dev.txt
+-r requirements.txt
+
+# Direct
+boto3-stubs[ssm]==1.44.7
+mypy==2.4.1
+pytest==9.2.0
+pytest-asyncio==1.4.1
+ruff==0.17.4  # keep in step with .pre-commit-config.yaml
+
+# Transitive
+ast-serialize==0.13.1
+botocore-stubs==1.43.126
+iniconfig==2.3.1
+librt==0.17.0
+mypy-boto3-ssm==1.44.3
+mypy-extensions==1.2.0
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.7.0
+pygments==2.21.0
+types-s3transfer==0.19.3
