@@ -193,3 +193,36 @@ def test_key_options_and_multiple_keys_per_user(database_url: str) -> None:
     assert private.user_id == normal.user_id
     assert private.key_id != normal.key_id
     assert [row["key_prefix"].startswith("llmgw_") for row in listed] == [True, True]
+
+
+def test_a_key_that_cannot_be_stored_in_ssm_is_revoked(
+    database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import cli
+    from app.auth import ssm
+
+    stored: dict[str, str] = {}
+
+    def failing_put(name: str, value: str, *, description: str) -> None:
+        stored["plaintext"] = value
+        raise ssm.KeyStorageError("could not store the key in SSM (AccessDenied)")
+
+    monkeypatch.setattr(ssm, "put_secure_parameter", failing_put)
+    args = cli.build_parser().parse_args(
+        ["issue-key", "alice", "--to-ssm", "/llm-gateway/keys/alice"]
+    )
+
+    async def scenario(pool: asyncpg.Pool) -> tuple[list[asyncpg.Record], object]:
+        await admin.create_user(pool, "alice")
+        with pytest.raises(admin.AdminError, match="was revoked"):
+            await cli.run_command(args, pool)
+        principal = await PostgresKeyStore(pool).lookup(
+            hash_api_key(stored["plaintext"])
+        )
+        return await admin.list_keys(pool, "alice"), principal
+
+    keys, principal = with_pool(database_url, scenario)
+
+    assert len(keys) == 1
+    assert keys[0]["revoked_at"] is not None
+    assert principal is None  # the unseen key can never authenticate

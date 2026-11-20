@@ -4,12 +4,13 @@ LLM Gateway is a service that sits between an application and AI model providers
 
 **Highlights**
 
-- **617 automated tests.** 568 run anywhere, and 49 more run against real Redis and PostgreSQL. CI runs all of them on every push.
+- **652 automated tests.** 602 run anywhere, and 50 more run against real Redis and PostgreSQL. CI runs all of them on every push.
 - **Failover.** In a test where the primary provider fails every call, all 100 requests are answered by the backup provider. The circuit breaker opens after 5 failures, so the failing provider is called 5 times in total.
 - **Caching.** A repeated request is answered from Redis without calling a provider, and costs $0. When 8 identical cacheable requests arrive at once, the gateway makes 1 provider call and gives all 8 the same answer.
 - **Answer quality.** On the 27 starter eval cases, OpenAI `gpt-4.1-mini` passed 27 and Anthropic `claude-haiku-5-5` passed 26. The whole run cost $0.0026, and the harness's cost figures matched the gateway's own billing records.
 - **A quality gate in CI.** Every push starts a real gateway, issues an API key, runs an eval against the Mock provider, and fails the build if the pass rate drops below 100%.
 - **Observable.** 20 Prometheus metrics, all on a Grafana dashboard generated from code. A test fails if any metric is missing from it.
+- **Deployable to AWS for about $1.65 a day.** Terraform defines ECS Fargate, a load balancer, RDS PostgreSQL and optional Redis in `us-east-2`, with no NAT Gateway, no secrets in Terraform state, and `/metrics` blocked at the load balancer. One script deploys, and one command tears it all down.
 
 ```mermaid
 flowchart LR
@@ -68,11 +69,21 @@ The current implementation supports OpenAI, Anthropic, and a Mock provider throu
   - Markdown reports (in `docs/evals/`)
   - Eval scores on the Grafana dashboard
   - An eval gate in CI against the Mock provider
+- AWS deployment with Terraform ([docs/deploy.md](docs/deploy.md)):
+  - ECS Fargate (ARM64) behind an Application Load Balancer, RDS PostgreSQL 16, optional ElastiCache Redis
+  - A VPC over two AZs with private subnets for the data stores and no NAT Gateway
+  - Secrets in SSM Parameter Store and an RDS-managed Secrets Manager secret, injected by ECS and kept out of Terraform state
+  - Least-privilege IAM: separate execution, task and admin task roles
+  - Remote state in S3 with S3-native locking, created by a small bootstrap config
+  - `deploy.sh` (build, push, migrate, roll out, check) and `run-task.sh` for one-off admin tasks
+  - `issue-key --to-ssm`, so a key issued in the cloud is never written to the logs
+- A hardened container image: non-root, multi-stage, digest-pinned, read-only root filesystem on ECS, with a health check
+- Pinned dependencies (`requirements.txt`, `requirements-dev.txt`)
+- CI checks for Terraform (`fmt`, `validate`, `tflint`) and the deploy scripts (`shellcheck`)
 - Automated unit, API, fault-injection, and real-Redis/Postgres integration tests
 
 **Planned**
 
-- AWS infrastructure and deployment (Terraform)
 - Benchmarks and final documentation
 - Configurable routes from a YAML file
 - Distributed tracing
@@ -83,10 +94,10 @@ The current implementation supports OpenAI, Anthropic, and a Mock provider throu
 - **Database:** PostgreSQL 16 (asyncpg)
 - **Cache and rate limiting:** Redis 7 (redis-py asyncio)
 - **Observability:** structured JSON logging, Prometheus, Grafana
-- **Infrastructure:** Docker, Docker Compose
-- **Testing:** pytest, Ruff, mypy
+- **Infrastructure:** Docker, Docker Compose, Terraform
+- **Cloud:** AWS (ECS Fargate, ALB, RDS, ElastiCache, ECR, SSM Parameter Store, Secrets Manager, CloudWatch Logs, S3)
+- **Testing:** pytest, Ruff, mypy, tflint, shellcheck
 - **CI:** GitHub Actions (with Redis and Postgres services), pre-commit
-- **Cloud (planned):** AWS, Terraform
 
 ## Request Pipeline
 
@@ -198,6 +209,8 @@ curl -H "Authorization: Bearer $KEY" "http://localhost:8000/v1/usage?days=7"
 ```
 
 Stop the services with `docker compose down`.
+
+The image runs as an unprivileged user (uid 10001). On a Linux host, the `evals` service can write reports into `docs/evals/` only if that directory is writable by uid 10001 (for example `chmod o+w docs/evals`). Docker Desktop on macOS and Windows needs no change.
 
 ## Observability
 
@@ -344,22 +357,25 @@ One sample per model is not a benchmark. Repeated runs and larger datasets are p
 
 ```bash
 python -m app.cli create-user NAME [--rate-limit N] [--daily-tokens N] [--daily-usd X]
-python -m app.cli issue-key NAME
+python -m app.cli issue-key NAME [--label TEXT] [--no-cache] [--to-ssm /llm-gateway/keys/NAME]
 python -m app.cli revoke-key KEY_ID
 python -m app.cli list-keys
 python -m app.cli set-limits NAME [--rate-limit N] [--daily-tokens N|none] [--daily-usd X|none]
 python -m app.cli kill-switch on|off|status [--reason TEXT]
 ```
 
-In Docker, prefix with `docker compose run --rm gateway`. Keys can only be created from the CLI; there is no HTTP admin API.
+In Docker, prefix with `docker compose run --rm gateway`. On AWS, prefix with `infra/scripts/run-task.sh` (see [docs/deploy.md](docs/deploy.md)). Keys can only be created from the CLI; there is no HTTP admin API.
+
+`issue-key --to-ssm NAME` stores the new key as an AWS SSM SecureString instead of printing it, and prints only the key id and the parameter name. It never overwrites an existing parameter, and if the key cannot be stored, it revokes the key. This is how keys are issued in the cloud, where command output goes to CloudWatch Logs.
 
 ## Configuration
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `DATABASE_URL` | PostgreSQL connection (required) | set in compose |
+| `DATABASE_URL` | PostgreSQL connection (required, or the `DB_*` parts below) | set in compose |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_SSLMODE` | Used to build the connection URL when `DATABASE_URL` is empty (AWS injects the password on its own) | port `5432` |
 | `DB_POOL_MAX` | Maximum Postgres connections | see `.env.example` |
-| `REDIS_URL` | Redis connection (optional; no Redis means no cache and no rate limits) | set in compose |
+| `REDIS_URL` | Redis connection (optional; empty or `none` means no Redis, so no cache and no rate limits) | set in compose |
 | `REDIS_TIMEOUT_S` | Redis connect/command timeout | see `.env.example` |
 | `CACHE_TTL_SECONDS` | Cache entry lifetime | see `.env.example` |
 | `RATE_LIMIT_FAIL_OPEN` | Allow requests if Redis is down (`true`) or reject them with 503 (`false`) | `true` |
@@ -370,7 +386,46 @@ In Docker, prefix with `docker compose run --rm gateway`. Keys can only be creat
 | `EVAL_API_KEY` | Gateway API key the eval CLI uses (instead of `--key`) | |
 | `GATEWAY_URL` | Gateway the eval CLI calls (instead of `--url`) | `http://localhost:8000` (in the `evals` service: `http://gateway:8000`) |
 
+## Deployment
+
+The gateway runs on AWS with ECS Fargate, an Application Load Balancer and RDS PostgreSQL. All of it is defined in Terraform in [`infra/`](infra/), in `us-east-2`. [docs/deploy.md](docs/deploy.md) is the full guide: bootstrap, plan, apply, deploy, migrations, keys, a smoke test, evals, logs, a cost table and teardown.
+
+```bash
+terraform -chdir=infra/bootstrap apply                 # once: the state bucket
+terraform -chdir=infra init -backend-config=backend.hcl
+terraform -chdir=infra apply                           # about 10 minutes
+infra/scripts/deploy.sh                                # build, push, migrate, roll out
+infra/scripts/run-task.sh python -m app.cli create-user demo
+terraform -chdir=infra destroy                         # when done
+```
+
+**Deploys are manual.** The project's AWS account is on the AWS free plan, whose service control policy denies the IAM actions for GitHub's OIDC provider. Without OIDC, GitHub Actions could only deploy with long-lived AWS keys, which this project does not store. So `infra/scripts/deploy.sh` runs from a laptop. The CI `deploy` job runs only once a deploy role is configured, and otherwise skips itself. The Terraform for the OIDC role is included behind `enable_github_oidc` for accounts that allow it.
+
+### Results from a live run
+
+One full run in `us-east-2` on 2026-11-20, with the Mock provider only:
+
+| Step | Result |
+|---|---|
+| `terraform apply` | 42 resources created in about 10 minutes (RDS took 9) |
+| `deploy.sh` | ARM64 image built and pushed, 4 migrations applied in a one-off task, service stable, `/healthz` OK through the load balancer |
+| `issue-key --to-ssm` | Key stored as a SecureString, read once and deleted; a search of all gateway logs found the key 0 times |
+| `/healthz`, `/readyz` | `ok`; `ready` with `postgres: ok`, `redis: disabled` |
+| `/metrics`, `/metrics/` | 404, answered by the load balancer |
+| Chat request without a key | 401 |
+| Chat request through the Mock | 200, `X-Provider: mock-1`, `X-Cache: BYPASS`, and the request appears in `/v1/usage` |
+| `mock_smoke` eval through the load balancer | 6/6 passed, p50 latency 73 ms, p95 97 ms |
+| `terraform destroy` (both configs) | 42 + 7 resources destroyed; `leftovers.sh` then found no billable resources |
+
+With the defaults (one task, no Redis), it costs about $0.07 an hour, $1.65 a day or $49 a month. The NAT Gateway, usually the largest hidden cost, is avoided on purpose: [docs/deploy.md](docs/deploy.md#design-decisions) explains the trade-off.
+
 ## Run Tests
+
+Install the pinned development dependencies:
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
 
 Without services (integration tests are skipped):
 
@@ -421,7 +476,7 @@ The integration tests reset the `gateway_test` database, so run this after them,
 - [x] Phase 4: Authentication, rate limiting, quotas, and cost tracking
 - [x] Phase 5: Observability and metrics
 - [x] Phase 6: Evaluation harness
-- [ ] Phase 7: Cloud deployment
+- [x] Phase 7: Cloud deployment
 - [ ] Phase 8: Benchmarking and final documentation
 
 ## Project Status
@@ -430,12 +485,15 @@ The integration tests reset the `gateway_test` database, so run this after them,
 
 Earlier phases made the gateway fast, cheap to run, reliable and observable. Phase 6 adds a way to measure answer quality: datasets of questions run through the gateway like real traffic, every answer is scored by rule or by an LLM judge, and the results are stored, reported, compared run against run, and charted on the dashboard. A model or setting that makes answers worse shows up as flagged cases, and CI fails the build if the harness itself breaks.
 
+**Phase 7 complete.** The gateway runs on AWS: ECS Fargate behind a load balancer, with RDS PostgreSQL, all defined in Terraform. It was deployed, tested and destroyed on the same day, and a check afterwards found nothing left in the account. See [Deployment](#deployment).
+
 **Current limitations**
 
 - Routes are defined in code rather than a configuration file.
 - Circuit breaker and single-flight state live in process memory and are not shared between gateway instances.
 - Metrics are per process: with several gateway instances, Prometheus must scrape each one.
-- `/metrics` has no authentication. It holds only aggregate counters, but should not be exposed to the internet in a deployment.
+- `/metrics` has no authentication. It holds only aggregate counters. The AWS load balancer answers it with a 404, so it is not reachable from the internet there, and nothing in AWS scrapes it.
+- The AWS deployment serves plain HTTP unless an ACM certificate is configured, runs one task by default, and is deployed from a laptop, because the AWS free plan blocks GitHub OIDC. [docs/deploy.md](docs/deploy.md#limitations) lists its limitations.
 - Rate limits need Redis; without Redis there are none.
 - Quotas are soft: a request is checked before it runs, so a user can overshoot by one request or one concurrent burst.
 - The kill switch needs PostgreSQL, takes up to 2 seconds to propagate, and does not cancel requests already in flight.

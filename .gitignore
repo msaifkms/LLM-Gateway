@@ -225,3 +225,17 @@ __marimo__/
 
 # macOS
 .DS_Store
+# Terraform: local plugins, state (can hold resource details), plans, and
+# variable files (can hold anything). The .example files are committed.
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+*.tfplan
+tfplan
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+infra/backend.hcl
+crash.log
+crash.*.log

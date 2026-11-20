@@ -1,12 +1,47 @@
+# Only the Dockerfile, requirements.txt and app/ are needed to build the image.
+# Everything else stays out of the build context: smaller, faster, and no
+# secrets or local state can end up in a layer by accident.
+
+# VCS, CI and editors
 .git
 .github
-.venv
+.gitignore
+.pre-commit-config.yaml
+.vscode
+.idea
+.DS_Store
+
+# Secrets and local environment
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+
+# Python caches and virtualenvs
+.venv
+venv
 __pycache__
+*.py[cod]
 .pytest_cache
 .mypy_cache
 .ruff_cache
-*.pyc
-.DS_Store
+.coverage
+htmlcov
+
+# Not part of the runtime
+tests
+docs
+ops
+scripts
+infra
+*.md
+LICENSE
+docker-compose.yml
+
+# Terraform state and plans (they can hold secrets)
+**/.terraform
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
