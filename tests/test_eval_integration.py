@@ -348,3 +348,46 @@ def replace_user(run: RunInfo, user_id: int) -> RunInfo:
     from dataclasses import replace
 
     return replace(run, user_id=user_id)
+
+
+def test_a_user_sees_their_own_eval_runs_through_the_api(
+    monkeypatch: pytest.MonkeyPatch, database_url: str
+) -> None:
+    """End to end: the CLI runs with alice's key; only alice's key can read it."""
+
+    async def setup(pool: asyncpg.Pool) -> tuple[str, str]:
+        await admin.create_user(pool, "alice", rate_limit_per_min=600)
+        await admin.create_user(pool, "bob")
+        alice = await admin.issue_key(pool, "alice")
+        bob = await admin.issue_key(pool, "bob")
+        return alice.plaintext, bob.plaintext
+
+    alice_key, bob_key = with_pool(database_url, setup)
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.delitem(app.dependency_overrides, authenticate)  # use real auth
+
+    async def run(*argv: str) -> int:
+        args = build_parser().parse_args(argv)
+        async with lifespan(app):
+            transport = httpx.ASGITransport(app=app)
+            return await run_with_database(args, database_url, transport)
+
+    argv = ["run", "--dataset", "mock_smoke", "--model", "mock-1", "--key", alice_key]
+    assert asyncio.run(run(*argv)) == 0
+
+    def bearer(key: str) -> dict[str, str]:
+        return {"Authorization": f"Bearer {key}"}
+
+    with TestClient(app) as client:
+        mine = client.get("/v1/evals/runs", headers=bearer(alice_key)).json()["runs"]
+        detail = client.get("/v1/evals/runs/1", headers=bearer(alice_key))
+        theirs = client.get("/v1/evals/runs", headers=bearer(bob_key)).json()["runs"]
+        peek = client.get("/v1/evals/runs/1", headers=bearer(bob_key))
+        anonymous = client.get("/v1/evals/runs/1")
+
+    assert [(r["id"], r["passed"], r["cases"]) for r in mine] == [(1, 6, 6)]
+    assert detail.status_code == 200
+    assert len(detail.json()["results"]) == 6
+    assert theirs == []
+    assert peek.status_code == 404
+    assert anonymous.status_code == 401
