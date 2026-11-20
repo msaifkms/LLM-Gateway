@@ -58,6 +58,10 @@ class Router:
     def get_route(self, name: str) -> Route | None:
         return self._routes.get(name)
 
+    def aliases(self) -> list[str]:
+        """Every model alias a client may request, sorted."""
+        return sorted(self._routes)
+
     def breaker_state(self, provider: str) -> BreakerState:
         breaker = self._breakers.get(provider)
         return breaker.state if breaker else BreakerState.CLOSED

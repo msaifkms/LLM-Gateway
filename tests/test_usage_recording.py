@@ -230,3 +230,48 @@ def test_without_a_database_requests_still_work_and_nothing_is_recorded(
     install(monkeypatch, store=None)
 
     assert post(client).status_code == 200
+
+
+# --- X-Cost-USD ---------------------------------------------------------------
+
+
+class PricedProvider:
+    """Answers as gpt-4.1-mini with 1,000 + 500 tokens (costs $0.0012)."""
+
+    async def complete(self, request: object) -> ChatCompletionResponse:
+        return answer("gpt-4.1-mini")
+
+
+def test_each_response_says_what_it_was_charged(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(
+        monkeypatch,
+        store=FakeUsageStore(),
+        fake_redis=FakeRedis(),
+        provider=PricedProvider(),  # type: ignore[arg-type]
+    )
+
+    miss = post(client)
+    hit = post(client)
+
+    assert miss.headers["x-cache"] == "MISS"
+    assert miss.headers["x-cost-usd"] == "0.00120000"
+    assert hit.headers["x-cache"] == "HIT"
+    assert hit.headers["x-cost-usd"] == "0.00000000"  # a hit is free
+
+
+def test_an_uncached_request_reports_its_cost_too(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install(
+        monkeypatch,
+        store=None,
+        fake_redis=None,
+        provider=PricedProvider(),  # type: ignore[arg-type]
+    )
+
+    response = post(client)
+
+    assert response.headers["x-cache"] == "BYPASS"
+    assert response.headers["x-cost-usd"] == "0.00120000"

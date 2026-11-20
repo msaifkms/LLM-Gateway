@@ -292,3 +292,102 @@ def test_an_eval_runs_through_the_real_gateway_and_is_billed_like_traffic(
     with TestClient(app) as client:
         body = client.get("/metrics").text
     assert 'gateway_eval_pass_rate{dataset="mock_smoke",model="mock-1"} 1.0' in body
+
+
+def test_runs_are_owned_and_scoped_to_their_user(database_url: str) -> None:
+    from app.auth.keys import hash_api_key
+
+    async def scenario(pool: asyncpg.Pool) -> dict[str, object]:
+        await admin.create_user(pool, "alice")
+        await admin.create_user(pool, "bob")
+        alice_key = await admin.issue_key(pool, "alice")
+        store = PostgresEvalStore(pool)
+        alice = await store.owner_of_key(hash_api_key(alice_key.plaintext))
+        bob = await pool.fetchval("SELECT id FROM users WHERE name = 'bob'")
+        assert alice is not None
+
+        alices = await store.create_run(replace_user(info(), alice))
+        await store.finish_run(alices.id or 0, "completed", [result("a")])
+        bobs = await store.create_run(replace_user(info("json_output"), bob))
+        unowned = await store.create_run(info("mock_smoke"))
+
+        await admin.revoke_key(pool, alice_key.key_id)
+        return {
+            "alice_runs": await store.list_runs_for_user(alice),
+            "bob_runs": await store.list_runs_for_user(bob),
+            "alice_reads_bobs": await store.get_run_for_user(alice, bobs.id or 0),
+            "alice_reads_own": await store.get_run_for_user(alice, alices.id or 0),
+            "nobody_reads_unowned": await store.get_run_for_user(
+                alice, unowned.id or 0
+            ),
+            "admin_sees": len(await store.list_runs()),
+            "revoked_key_owner": await store.owner_of_key(
+                hash_api_key(alice_key.plaintext)
+            ),
+            "unknown_key_owner": await store.owner_of_key(hash_api_key("llmgw_x")),
+        }
+
+    out = with_pool(database_url, scenario)
+
+    alice_runs = out["alice_runs"]
+    assert isinstance(alice_runs, list)
+    assert [(r.info.dataset, r.cases, r.passed) for r in alice_runs] == [
+        ("factual_qa", 1, 1)
+    ]
+    assert isinstance(out["bob_runs"], list)
+    assert [r.info.dataset for r in out["bob_runs"]] == ["json_output"]
+    assert out["alice_reads_bobs"] is None
+    assert out["alice_reads_own"] is not None
+    assert out["nobody_reads_unowned"] is None
+    assert out["admin_sees"] == 3  # the CLI still lists everything
+    assert out["revoked_key_owner"] is None  # same rules as authentication
+    assert out["unknown_key_owner"] is None
+
+
+def replace_user(run: RunInfo, user_id: int) -> RunInfo:
+    from dataclasses import replace
+
+    return replace(run, user_id=user_id)
+
+
+def test_a_user_sees_their_own_eval_runs_through_the_api(
+    monkeypatch: pytest.MonkeyPatch, database_url: str
+) -> None:
+    """End to end: the CLI runs with alice's key; only alice's key can read it."""
+
+    async def setup(pool: asyncpg.Pool) -> tuple[str, str]:
+        await admin.create_user(pool, "alice", rate_limit_per_min=600)
+        await admin.create_user(pool, "bob")
+        alice = await admin.issue_key(pool, "alice")
+        bob = await admin.issue_key(pool, "bob")
+        return alice.plaintext, bob.plaintext
+
+    alice_key, bob_key = with_pool(database_url, setup)
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.delitem(app.dependency_overrides, authenticate)  # use real auth
+
+    async def run(*argv: str) -> int:
+        args = build_parser().parse_args(argv)
+        async with lifespan(app):
+            transport = httpx.ASGITransport(app=app)
+            return await run_with_database(args, database_url, transport)
+
+    argv = ["run", "--dataset", "mock_smoke", "--model", "mock-1", "--key", alice_key]
+    assert asyncio.run(run(*argv)) == 0
+
+    def bearer(key: str) -> dict[str, str]:
+        return {"Authorization": f"Bearer {key}"}
+
+    with TestClient(app) as client:
+        mine = client.get("/v1/evals/runs", headers=bearer(alice_key)).json()["runs"]
+        detail = client.get("/v1/evals/runs/1", headers=bearer(alice_key))
+        theirs = client.get("/v1/evals/runs", headers=bearer(bob_key)).json()["runs"]
+        peek = client.get("/v1/evals/runs/1", headers=bearer(bob_key))
+        anonymous = client.get("/v1/evals/runs/1")
+
+    assert [(r["id"], r["passed"], r["cases"]) for r in mine] == [(1, 6, 6)]
+    assert detail.status_code == 200
+    assert len(detail.json()["results"]) == 6
+    assert theirs == []
+    assert peek.status_code == 404
+    assert anonymous.status_code == 401

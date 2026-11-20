@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 import asyncpg
 
+from app.auth.store import PostgresKeyStore
 from app.evals.report import RunInfo
 from app.evals.runner import CaseResult
 
@@ -45,10 +46,26 @@ class EvalStore(Protocol):
         self, *, dataset: str | None = None, limit: int = 20
     ) -> list[RunListing]: ...
 
+    async def owner_of_key(self, key_hash: str) -> int | None: ...
+
+
+class UserEvalStore(Protocol):
+    """Read-only and scoped to one user: what GET /v1/evals/runs needs."""
+
+    async def list_runs_for_user(
+        self, user_id: int, *, limit: int = 20
+    ) -> list[RunListing]: ...
+
+    async def get_run_for_user(self, user_id: int, run_id: int) -> RunInfo | None: ...
+
+    async def get_results(self, run_id: int) -> list[CaseResult]: ...
+
 
 INSERT_RUN_SQL = """
-INSERT INTO eval_runs (dataset, dataset_sha256, model, judge_model, batch_id, settings)
-VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+INSERT INTO eval_runs (
+    dataset, dataset_sha256, model, judge_model, batch_id, settings, user_id
+)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
 RETURNING *
 """
 
@@ -74,6 +91,19 @@ SELECT r.*,
 FROM eval_runs AS r
 LEFT JOIN eval_results AS e ON e.run_id = r.id
 WHERE ($1::text IS NULL OR r.dataset = $1)
+GROUP BY r.id
+ORDER BY r.id DESC
+LIMIT $2
+"""
+
+#: One user's runs only. NULL owners never match, so unowned runs stay hidden.
+LIST_USER_RUNS_SQL = """
+SELECT r.*,
+       count(e.id)::int AS cases,
+       (count(e.id) FILTER (WHERE e.passed))::int AS passed
+FROM eval_runs AS r
+LEFT JOIN eval_results AS e ON e.run_id = r.id
+WHERE r.user_id = $1
 GROUP BY r.id
 ORDER BY r.id DESC
 LIMIT $2
@@ -115,6 +145,7 @@ def _info(row: Any) -> RunInfo:
         started_at=row["started_at"],
         finished_at=row["finished_at"],
         settings=json.loads(settings) if isinstance(settings, str) else settings,
+        user_id=row["user_id"],
     )
 
 
@@ -154,6 +185,7 @@ class PostgresEvalStore:
             info.judge_model,
             info.batch_id,
             json.dumps(info.settings),
+            info.user_id,
         )
         return _info(row)
 
@@ -211,6 +243,23 @@ class PostgresEvalStore:
     ) -> list[RunListing]:
         rows = await self._pool.fetch(LIST_RUNS_SQL, dataset, limit)
         return [RunListing(_info(r), r["cases"], r["passed"]) for r in rows]
+
+    async def owner_of_key(self, key_hash: str) -> int | None:
+        """The user behind an active key, with the same rules as authentication."""
+        principal = await PostgresKeyStore(self._pool).lookup(key_hash)
+        return principal.user_id if principal is not None else None
+
+    async def list_runs_for_user(
+        self, user_id: int, *, limit: int = 20
+    ) -> list[RunListing]:
+        rows = await self._pool.fetch(LIST_USER_RUNS_SQL, user_id, limit)
+        return [RunListing(_info(r), r["cases"], r["passed"]) for r in rows]
+
+    async def get_run_for_user(self, user_id: int, run_id: int) -> RunInfo | None:
+        row = await self._pool.fetchrow(
+            "SELECT * FROM eval_runs WHERE id = $1 AND user_id = $2", run_id, user_id
+        )
+        return _info(row) if row is not None else None
 
     async def latest_scores(self) -> list[LatestScore]:
         rows = await self._pool.fetch(LATEST_SCORES_SQL, MAX_SCOREBOARD_SERIES)

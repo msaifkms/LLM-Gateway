@@ -10,9 +10,12 @@ from app.evals.store import RunListing
 
 
 class FakeEvalStore:
-    def __init__(self) -> None:
+    def __init__(self, owner_id: int | None = 1) -> None:
         self.runs: dict[int, RunInfo] = {}
         self.results: dict[int, list[CaseResult]] = {}
+        #: Who owner_of_key says holds any key (None: an unknown key).
+        self.owner_id = owner_id
+        self.looked_up: list[str] = []
 
     async def create_run(self, info: RunInfo) -> RunInfo:
         run_id = len(self.runs) + 1
@@ -54,3 +57,17 @@ class FakeEvalStore:
                 RunListing(run, len(results), sum(r.passed for r in results))
             )
         return listings
+
+    async def owner_of_key(self, key_hash: str) -> int | None:
+        self.looked_up.append(key_hash)
+        return self.owner_id
+
+    async def list_runs_for_user(
+        self, user_id: int, *, limit: int = 20
+    ) -> list[RunListing]:
+        listings = await self.list_runs(limit=len(self.runs) or 1)
+        return [item for item in listings if item.info.user_id == user_id][:limit]
+
+    async def get_run_for_user(self, user_id: int, run_id: int) -> RunInfo | None:
+        run = self.runs.get(run_id)
+        return run if run is not None and run.user_id == user_id else None

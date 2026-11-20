@@ -12,7 +12,7 @@ python -m app.evals report 3                                   # one stored run
 python -m app.evals compare 5 6 --fail-on-regression           # two runs side by side
 ```
 
-The key comes from `--key` or the `EVAL_API_KEY` environment variable. The variable is better, because it keeps the key out of your shell history. The key is sent only in the `Authorization` header and is never printed, logged or stored.
+Each stored run belongs to the user who owns that key, so they can see it in the web UI (`/ui/evals`) and through `GET /v1/evals/runs`. Other users cannot. The key comes from `--key` or the `EVAL_API_KEY` environment variable. The variable is better, because it keeps the key out of your shell history. The key is sent only in the `Authorization` header and is never printed, logged or stored.
 
 ## Datasets
 

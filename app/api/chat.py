@@ -79,10 +79,9 @@ async def create_chat_completion(
         if cached is not None:
             response.headers["X-Cache"] = "HIT"
             metrics.CACHE_REQUESTS.labels("HIT").inc()
-            await record_usage(
-                usage_store,
-                build_event(principal, request.model, "HIT", "cache", cached),
-            )
+            event = build_event(principal, request.model, "HIT", "cache", cached)
+            response.headers["X-Cost-USD"] = f"{event.cost_usd:.8f}"
+            await record_usage(usage_store, event)
             return cached
 
     # A provider is about to be paid for (cache hits returned above, free).
@@ -121,10 +120,10 @@ async def create_chat_completion(
     response.headers["X-Cache"] = cache_status
     metrics.CACHE_REQUESTS.labels(cache_status).inc()
     response.headers["X-Provider"] = result.provider
-    await record_usage(
-        usage_store,
-        build_event(
-            principal, request.model, cache_status, result.provider, result.response
-        ),
+    event = build_event(
+        principal, request.model, cache_status, result.provider, result.response
     )
+    # What this request was charged: 0 for a cache hit or a coalesced follower.
+    response.headers["X-Cost-USD"] = f"{event.cost_usd:.8f}"
+    await record_usage(usage_store, event)
     return result.response

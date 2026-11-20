@@ -4,7 +4,7 @@ LLM Gateway is a service that sits between an application and AI model providers
 
 **Highlights**
 
-- **652 automated tests.** 602 run anywhere, and 50 more run against real Redis and PostgreSQL. CI runs all of them on every push.
+- **721 automated tests.** 669 run anywhere, and 52 more run against real Redis and PostgreSQL. CI runs all of them on every push.
 - **Failover.** In a test where the primary provider fails every call, all 100 requests are answered by the backup provider. The circuit breaker opens after 5 failures, so the failing provider is called 5 times in total.
 - **Caching.** A repeated request is answered from Redis without calling a provider, and costs $0. When 8 identical cacheable requests arrive at once, the gateway makes 1 provider call and gives all 8 the same answer.
 - **Answer quality.** On the 27 starter eval cases, OpenAI `gpt-4.1-mini` passed 27 and Anthropic `claude-haiku-5-5` passed 26. The whole run cost $0.0026, and the harness's cost figures matched the gateway's own billing records.
@@ -80,6 +80,7 @@ The current implementation supports OpenAI, Anthropic, and a Mock provider throu
 - A hardened container image: non-root, multi-stage, digest-pinned, read-only root filesystem on ECS, with a health check
 - Pinned dependencies (`requirements.txt`, `requirements-dev.txt`)
 - CI checks for Terraform (`fmt`, `validate`, `tflint`) and the deploy scripts (`shellcheck`)
+- A web UI at `/ui` (Playground, Usage, Evals) with no build step and a strict Content-Security-Policy
 - Automated unit, API, fault-injection, and real-Redis/Postgres integration tests
 
 **Planned**
@@ -140,6 +141,7 @@ Record usage and cost (Postgres) → response
 | `X-Request-ID` | ID of this request, also on every log line it produced (a valid incoming `X-Request-ID` is reused) |
 | `X-Provider` | Which provider answered |
 | `X-Cache` | `HIT`, `MISS`, `COALESCED` or `BYPASS` |
+| `X-Cost-USD` | What this request was charged, for example `0.00120000` (`0.00000000` for a cache hit or a coalesced request) |
 | `X-RateLimit-Limit` / `X-RateLimit-Remaining` | The key's per-minute limit and tokens left |
 | `Retry-After` | Seconds to wait (rate limit, quota, kill switch, upstream limits) |
 
@@ -163,6 +165,10 @@ Error messages shown to clients are generic and never include provider responses
 |---|---|---|
 | `POST /v1/chat/completions` | API key | Chat completion |
 | `GET /v1/usage?days=7` | API key | Your tokens, cost, savings, by model and by UTC day (1 to 90 days) |
+| `GET /v1/models` | API key | The model aliases you can request |
+| `GET /v1/evals/runs?limit=20` | API key | Your eval runs, newest first (1 to 100) |
+| `GET /v1/evals/runs/{id}` | API key | One of your eval runs, with a summary and every case |
+| `GET /ui` | none for the page; the API key for data | Web UI: Playground, Usage and Evals |
 | `GET /healthz` | none | Liveness (process is up) |
 | `GET /readyz` | none | Readiness (PostgreSQL reachable) |
 | `GET /metrics` | none | Prometheus metrics (aggregate counters only, no prompts or keys) |
@@ -211,6 +217,33 @@ curl -H "Authorization: Bearer $KEY" "http://localhost:8000/v1/usage?days=7"
 Stop the services with `docker compose down`.
 
 The image runs as an unprivileged user (uid 10001). On a Linux host, the `evals` service can write reports into `docs/evals/` only if that directory is writable by uid 10001 (for example `chmod o+w docs/evals`). Docker Desktop on macOS and Windows needs no change.
+
+## Web UI
+
+The gateway serves a small web UI at http://localhost:8000/ui. Paste an API key into the bar at the top and use three pages:
+
+- **Playground:** pick a model alias, write a message, set the temperature, optionally bypass the cache, and send. The reply is shown with the provider, cache result, latency, request ID, tokens and cost. A rejected key (401), a rate limit or quota (429, with a countdown from `Retry-After`) and an unavailable gateway (503) each get a clear message.
+- **Usage:** your requests, tokens, cost and cache savings for 1, 7 or 30 days, with a per-day chart (hover, arrow keys, or a table view) and a per-model table.
+- **Evals:** your eval runs with their pass rate, model, dataset and date. Click a run to see every case, its score and the model's answer.
+
+| Playground | Usage |
+|---|---|
+| ![Playground, light theme](docs/ui/playground-light.png) | ![Usage, dark theme](docs/ui/usage-dark.png) |
+| **Evals** | **Eval run** |
+| ![Eval runs](docs/ui/evals-light.png) | ![One eval run with every case](docs/ui/eval-run-dark.png) |
+
+More in [docs/ui/](docs/ui/): the dark Playground, the light Usage page, the 429 state, and phone layouts.
+
+It is plain HTML, CSS and a little JavaScript served by FastAPI, with no build step and nothing loaded from another site. Light and dark themes follow the system (or the toggle), the layout works down to phone width, every control has a label, and focus is always visible.
+
+**Security**
+
+- The key is kept in `sessionStorage` only, so it is gone when the tab closes. It is never stored in `localStorage` or a cookie and never put in a URL, and it is sent only as `Authorization: Bearer` on same-origin calls to `/v1/`.
+- The pages are static and public, and hold no data. Everything they show comes from the same authenticated API any client uses, so the UI adds no new way in. It offers no admin actions; those stay in the CLI.
+- Every `/ui` response carries a strict Content-Security-Policy: scripts, styles and requests only to this origin, no inline code, no `eval`, Trusted Types, and no framing. It also sends `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `Cross-Origin-Opener-Policy: same-origin`.
+- Data is always inserted as text, never parsed as HTML. Tests check that the scripts use no HTML-injection sinks.
+
+**Eval runs belong to a user.** A run is owned by the user whose API key the eval CLI ran with (since migration `005`), and the Evals page and `/v1/evals/runs` show only your own runs. Runs made before that migration, or with a key the CLI's database does not know, have no owner. They are not shown to anyone in the UI, but `python -m app.evals list` (which reads the database directly) still lists them.
 
 ## Observability
 
@@ -485,6 +518,8 @@ The integration tests reset the `gateway_test` database, so run this after them,
 
 Earlier phases made the gateway fast, cheap to run, reliable and observable. Phase 6 adds a way to measure answer quality: datasets of questions run through the gateway like real traffic, every answer is scored by rule or by an LLM judge, and the results are stored, reported, compared run against run, and charted on the dashboard. A model or setting that makes answers worse shows up as flagged cases, and CI fails the build if the harness itself breaks.
 
+A web UI at `/ui` lets a user try the gateway, see their usage and browse their eval runs, with nothing but their API key.
+
 **Phase 7 complete.** The gateway runs on AWS: ECS Fargate behind a load balancer, with RDS PostgreSQL, all defined in Terraform. It was deployed, tested and destroyed on the same day, and a check afterwards found nothing left in the account. See [Deployment](#deployment).
 
 **Current limitations**
@@ -507,6 +542,8 @@ Earlier phases made the gateway fast, cheap to run, reliable and observable. Pha
 - The eval metrics show only the latest completed run per dataset and model (from the last 30 days), not a history. Use `python -m app.evals list` and `compare` for history.
 - Eval results stored in PostgreSQL include each model's answers (but never API keys or headers), so do not put sensitive data in eval datasets.
 - Only text-based, non-streaming chat completions are supported.
+- The Playground sends a single user message, with no system prompt or conversation history.
+- The web UI is for one user and their own key. It has no login of its own, no admin features, and no view across users.
 
 This project is under active development and is not yet intended for production use.
 

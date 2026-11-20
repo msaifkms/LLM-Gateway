@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 import asyncpg
 import httpx
 
-from app.auth.keys import looks_like_api_key
+from app.auth.keys import hash_api_key, looks_like_api_key
 from app.cli import positive_int
 from app.core.config import Settings
 from app.db.pool import create_db_pool
@@ -204,6 +204,7 @@ async def run_one_model(
     client: GatewayClient,
     store: EvalStore | None,
     batch_id: str,
+    user_id: int | None = None,
 ) -> tuple[RunInfo, list[CaseResult]]:
     info = RunInfo(
         dataset=dataset.name,
@@ -214,6 +215,7 @@ async def run_one_model(
         status="running",
         started_at=datetime.now(UTC),
         settings=settings.as_json(),
+        user_id=user_id,
     )
     if store is not None:
         info = await store.create_run(info)
@@ -270,6 +272,15 @@ async def cmd_run(
     models = list(dict.fromkeys(args.model))  # repeated --model counts once
     batch_id = uuid.uuid4().hex
 
+    # Runs belong to the key's owner, so they can see them (GET /v1/evals/runs).
+    user_id = await store.owner_of_key(hash_api_key(key)) if store else None
+    if store is not None and user_id is None:
+        print(
+            "warning: this key is not an active key in this database, so the run "
+            "is stored without an owner and only the admin CLI will show it",
+            file=sys.stderr,
+        )
+
     runs: list[tuple[RunInfo, list[CaseResult]]] = []
     async with httpx.AsyncClient(
         base_url=url, timeout=httpx.Timeout(args.timeout), transport=transport
@@ -292,7 +303,9 @@ async def cmd_run(
             )
             try:
                 runs.append(
-                    await run_one_model(dataset, settings, client, store, batch_id)
+                    await run_one_model(
+                        dataset, settings, client, store, batch_id, user_id
+                    )
                 )
             except GatewayError as exc:
                 return fail(f"the gateway refused the run ({exc})", 1)

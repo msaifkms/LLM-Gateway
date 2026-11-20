@@ -363,7 +363,7 @@ From then on, every push to `main` that passes the tests and Terraform checks ru
 
 ## Limitations
 
-- **HTTP only by default.** API keys cross the internet unencrypted between the client and the load balancer. That is acceptable for a short demo restricted to your IP (`allowed_ingress_cidrs`), not for real use. Set `certificate_arn` to an ACM certificate for a domain you own to get HTTPS with an HTTP-to-HTTPS redirect.
+- **HTTP only by default.** API keys cross the internet unencrypted between the client and the load balancer, including a key pasted into the web UI at `/ui`. That is acceptable for a short demo restricted to your IP (`allowed_ingress_cidrs`), not for real use. Set `certificate_arn` to an ACM certificate for a domain you own to get HTTPS with an HTTP-to-HTTPS redirect.
 - **The gateway checks TLS to Postgres but does not verify the certificate** (`sslmode=require`, not `verify-full`). Traffic never leaves the VPC. Verifying it would mean shipping the RDS CA bundle in the image.
 - **The RDS-managed password rotates every 7 days by default.** Running tasks keep the password they started with, so after a rotation, new connections fail until the tasks restart (`--force-new-deployment`). This does not matter for a same-day demo.
 - **One task, one AZ for the database.** There is no failover. `desired_count = 2` spreads tasks over both AZs. RDS Multi-AZ would double the database cost.
