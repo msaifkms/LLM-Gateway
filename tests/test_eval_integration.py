@@ -292,3 +292,59 @@ def test_an_eval_runs_through_the_real_gateway_and_is_billed_like_traffic(
     with TestClient(app) as client:
         body = client.get("/metrics").text
     assert 'gateway_eval_pass_rate{dataset="mock_smoke",model="mock-1"} 1.0' in body
+
+
+def test_runs_are_owned_and_scoped_to_their_user(database_url: str) -> None:
+    from app.auth.keys import hash_api_key
+
+    async def scenario(pool: asyncpg.Pool) -> dict[str, object]:
+        await admin.create_user(pool, "alice")
+        await admin.create_user(pool, "bob")
+        alice_key = await admin.issue_key(pool, "alice")
+        store = PostgresEvalStore(pool)
+        alice = await store.owner_of_key(hash_api_key(alice_key.plaintext))
+        bob = await pool.fetchval("SELECT id FROM users WHERE name = 'bob'")
+        assert alice is not None
+
+        alices = await store.create_run(replace_user(info(), alice))
+        await store.finish_run(alices.id or 0, "completed", [result("a")])
+        bobs = await store.create_run(replace_user(info("json_output"), bob))
+        unowned = await store.create_run(info("mock_smoke"))
+
+        await admin.revoke_key(pool, alice_key.key_id)
+        return {
+            "alice_runs": await store.list_runs_for_user(alice),
+            "bob_runs": await store.list_runs_for_user(bob),
+            "alice_reads_bobs": await store.get_run_for_user(alice, bobs.id or 0),
+            "alice_reads_own": await store.get_run_for_user(alice, alices.id or 0),
+            "nobody_reads_unowned": await store.get_run_for_user(
+                alice, unowned.id or 0
+            ),
+            "admin_sees": len(await store.list_runs()),
+            "revoked_key_owner": await store.owner_of_key(
+                hash_api_key(alice_key.plaintext)
+            ),
+            "unknown_key_owner": await store.owner_of_key(hash_api_key("llmgw_x")),
+        }
+
+    out = with_pool(database_url, scenario)
+
+    alice_runs = out["alice_runs"]
+    assert isinstance(alice_runs, list)
+    assert [(r.info.dataset, r.cases, r.passed) for r in alice_runs] == [
+        ("factual_qa", 1, 1)
+    ]
+    assert isinstance(out["bob_runs"], list)
+    assert [r.info.dataset for r in out["bob_runs"]] == ["json_output"]
+    assert out["alice_reads_bobs"] is None
+    assert out["alice_reads_own"] is not None
+    assert out["nobody_reads_unowned"] is None
+    assert out["admin_sees"] == 3  # the CLI still lists everything
+    assert out["revoked_key_owner"] is None  # same rules as authentication
+    assert out["unknown_key_owner"] is None
+
+
+def replace_user(run: RunInfo, user_id: int) -> RunInfo:
+    from dataclasses import replace
+
+    return replace(run, user_id=user_id)

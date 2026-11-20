@@ -330,3 +330,36 @@ def test_markdown_paths(tmp_path: Path) -> None:
     assert markdown_path(str(tmp_path / "a.md"), "x") == tmp_path / "a.md"
     assert markdown_path(str(tmp_path / "dir"), "x") == tmp_path / "dir" / "x.md"
     assert (tmp_path / "dir").is_dir()
+
+
+def test_a_run_belongs_to_the_owner_of_its_key(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app.auth.keys import hash_api_key
+
+    store = FakeEvalStore(owner_id=42)
+
+    code = run_cli(
+        "run", "--dataset", "mock_smoke", "--model", "mock-1", "--model", "chat-test",
+        "--key", KEY, store=store,
+    )  # fmt: skip
+
+    assert code == 0
+    assert store.looked_up == [hash_api_key(KEY)]  # the hash, never the key
+    assert {run.user_id for run in store.runs.values()} == {42}
+    assert "warning" not in capsys.readouterr().err
+
+
+def test_a_key_unknown_to_the_database_stores_an_unowned_run_with_a_warning(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store = FakeEvalStore(owner_id=None)
+
+    code = run_cli(
+        "run", "--dataset", "mock_smoke", "--model", "mock-1", "--key", KEY,
+        store=store,
+    )  # fmt: skip
+
+    assert code == 0
+    assert store.runs[1].user_id is None
+    assert "stored without an owner" in capsys.readouterr().err

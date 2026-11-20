@@ -73,6 +73,7 @@ def test_migrations_create_tables_and_are_idempotent(database_url: str) -> None:
         "002_usage_events",
         "003_gateway_flags",
         "004_eval_runs",
+        "005_eval_run_owner",
     ]
     assert second == []  # already applied: nothing to do
     assert {
@@ -107,6 +108,7 @@ def test_two_instances_migrating_at_once_apply_each_file_once(
             "002_usage_events",
             "003_gateway_flags",
             "004_eval_runs",
+            "005_eval_run_owner",
         ],
     ]
 

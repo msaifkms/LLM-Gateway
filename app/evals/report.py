@@ -75,6 +75,8 @@ class RunInfo:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     settings: dict[str, Any] = field(default_factory=dict)
+    #: Owner of the API key the run used; None if unknown (or not stored).
+    user_id: int | None = None
 
     @property
     def label(self) -> str:
