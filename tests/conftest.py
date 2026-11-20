@@ -26,6 +26,7 @@ def no_external_services_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("REDIS_URL", "")
     monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.delenv("DB_HOST", raising=False)
 
 
 @pytest.fixture(autouse=True)
