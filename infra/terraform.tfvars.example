@@ -1,0 +1,24 @@
+# Copy to terraform.tfvars (gitignored) and adjust. Every value here is a
+# default except allowed_ingress_cidrs; never put secrets in this file.
+
+# Who may reach the load balancer. Your own IP keeps the demo private:
+#   curl -s https://checkip.amazonaws.com
+allowed_ingress_cidrs = ["203.0.113.10/32"]
+
+# Sizes (the smallest sensible values are the defaults).
+# task_cpu          = 256
+# task_memory       = 512
+# desired_count     = 1
+# cpu_architecture  = "ARM64"
+# db_instance_class = "db.t4g.micro"
+# log_retention_days = 7
+
+# Optional Redis (adds about $12/month). Off: no response cache, no rate limits.
+# enable_redis = true
+
+# HTTPS needs a certificate in ACM for a domain you own.
+# certificate_arn = "arn:aws:acm:us-east-2:<account-id>:certificate/<id>"
+
+# GitHub OIDC deploys. Blocked by the AWS free plan's SCP, so off by default.
+# enable_github_oidc = true
+# github_repository  = "owner/name"

@@ -1,0 +1,7 @@
+# Copy to backend.hcl (gitignored), or generate it from the bootstrap output:
+#   terraform -chdir=infra/bootstrap output -raw backend_config > infra/backend.hcl
+bucket       = "llm-gateway-tfstate-<suffix>"
+key          = "llm-gateway/terraform.tfstate"
+region       = "us-east-2"
+use_lockfile = true
+encrypt      = true
