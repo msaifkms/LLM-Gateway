@@ -256,3 +256,121 @@ def test_the_key_lives_only_in_session_storage() -> None:
         assert "console.log" not in text
         if js.name != "common.js":
             assert "sessionStorage" not in text and "fetch(" not in text
+
+
+# --- the visual theme ----------------------------------------------------------
+
+
+def test_every_icon_used_is_in_each_pages_sprite() -> None:
+    js_icons: set[str] = set()
+    for js in JS_FILES:
+        source = js.read_text()
+        js_icons |= set(re.findall(r'icon\("([a-z-]+)"', source))
+        # stat(...) calls pass an icon name: the lowercase literals on those
+        # lines (labels and values are capitalised or contain spaces).
+        for line in source.splitlines():
+            if "stat(" in line and "function stat" not in line:
+                js_icons |= set(re.findall(r'"([a-z][a-z-]*)"', line))
+    assert js_icons, "the scripts use sprite icons"
+    for page in sorted(PAGES_DIR.glob("*.html")):
+        html = page.read_text()
+        defined = set(re.findall(r'<symbol id="i-([a-z-]+)"', html))
+        used = set(re.findall(r'<use href="#i-([a-z-]+)"', html))
+        assert used <= defined, (page.name, used - defined)
+        assert js_icons <= defined, (page.name, js_icons - defined)
+
+
+def test_the_playground_keeps_every_element_its_script_uses() -> None:
+    html = (PAGES_DIR / "playground.html").read_text()
+    source = (STATIC_DIR / "js" / "playground.js").read_text()
+
+    for element_id in set(re.findall(r'\$\("#([a-z-]+)"\)', source)):
+        assert f'id="{element_id}"' in html, element_id
+
+
+def _hex(color: str) -> tuple[int, int, int]:
+    color = color.lstrip("#")
+    return int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
+
+
+def _parse(color: str, under: tuple[int, int, int]) -> tuple[int, int, int]:
+    """#rrggbb, or rgb(r g b / a) composited over the colour underneath."""
+    color = color.strip()
+    if color.startswith("#"):
+        return _hex(color)
+    match = re.fullmatch(r"rgb\((\d+) (\d+) (\d+) / ([\d.]+)\)", color)
+    assert match, color
+    r, g, b, a = (float(x) for x in match.groups())
+    return tuple(
+        round(a * c + (1 - a) * u) for c, u in zip((r, g, b), under, strict=True)
+    )  # type: ignore[return-value]
+
+
+def _luminance(rgb: tuple[int, int, int]) -> float:
+    def channel(v: int) -> float:
+        x = v / 255
+        return x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4
+
+    r, g, b = (channel(v) for v in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
+    hi, lo = sorted((_luminance(a), _luminance(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _tokens(block: str) -> dict[str, str]:
+    return dict(re.findall(r"--([a-z0-9-]+):\s*([^;]+);", block))
+
+
+def _themes() -> dict[str, dict[str, str]]:
+    css = (STATIC_DIR / "css" / "app.css").read_text()
+    light = _tokens(
+        css[css.index(":root {") : css.index("@media (prefers-color-scheme: dark)")]
+    )
+    dark_start = css.index(':root[data-theme="dark"] {')
+    dark = light | _tokens(css[dark_start : css.index("}", dark_start)])
+    return {"light": light, "dark": dark}
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_theme_colours_meet_wcag_aa(theme: str) -> None:
+    t = _themes()[theme]
+    surface = _hex(t["surface"])
+    bg = _hex(t["bg"])
+
+    def check(fg: str, under: tuple[int, int, int], need: float) -> None:
+        ratio = _contrast(_parse(t[fg], under), under)
+        assert ratio >= need, f"{theme}: --{fg} is {ratio:.2f}:1, needs {need}"
+
+    for fg in ("text", "text-2", "accent"):
+        check(fg, surface, 4.5)
+        check(fg, bg, 4.5)
+    check("text-2", _hex(t["surface-2"]), 4.5)
+    check("control-border", surface, 3)  # form-control boundaries
+    check("focus", bg, 3)
+    check("focus", surface, 3)
+    for kind in ("hit", "miss", "bypass", "coalesced", "pass", "fail", "warn"):
+        badge = _parse(t[f"{kind}-bg"], surface)
+        ratio = _contrast(_parse(t[f"{kind}-fg"], badge), badge)
+        assert ratio >= 4.5, f"{theme}: {kind} badge is {ratio:.2f}:1"
+    # Text on the gradient: every stop must carry the dark text at AA.
+    for stop in re.findall(r"#[0-9a-f]{6}", t["gradient"]):
+        ratio = _contrast(_hex(t["on-gradient"]), _hex(stop))
+        assert ratio >= 4.5, f"{theme}: text on gradient stop {stop} is {ratio:.2f}:1"
+
+
+def test_motion_respects_reduced_motion() -> None:
+    css = (STATIC_DIR / "css" / "app.css").read_text()
+
+    assert "@media (prefers-reduced-motion: reduce)" in css
+    # Animations are only switched on when motion is welcome.
+    assert "@media (prefers-reduced-motion: no-preference)" in css
+
+
+def test_the_hidden_attribute_always_hides() -> None:
+    """Buttons set display: inline-flex, which would otherwise beat [hidden]."""
+    css = (STATIC_DIR / "css" / "app.css").read_text()
+
+    assert "[hidden] { display: none !important; }" in css

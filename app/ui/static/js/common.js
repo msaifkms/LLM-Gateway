@@ -154,6 +154,27 @@ export function $(selector) {
   return document.querySelector(selector);
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** A stroke icon from the page's inline sprite (<symbol id="i-NAME">). */
+export function icon(name, className = "icon") {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", className);
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const use = document.createElementNS(SVG_NS, "use");
+  use.setAttribute("href", `#i-${name}`);
+  svg.append(use);
+  return svg;
+}
+
+const CACHE_BADGES = { HIT: "badge-hit", MISS: "badge-miss", BYPASS: "badge-bypass", COALESCED: "badge-coalesced" };
+
+/** A pill for an X-Cache value, tinted by outcome (HIT green, MISS amber, ...). */
+export function cacheBadge(status) {
+  return el("span", { class: `badge ${CACHE_BADGES[status] || ""}`, text: status || "–" });
+}
+
 /** Show an ApiError (or any error) in an alert box. */
 export function showError(box, error) {
   box.className = error && error.status === 429 ? "alert alert-warning" : "alert alert-error";
@@ -224,6 +245,8 @@ function renderKeyStatus() {
   }
   if (toggle) {
     toggle.textContent = key ? "Key ✓" : "Set key";
+    // A call to action only while no key is set; then it steps back.
+    toggle.classList.toggle("btn-quiet", Boolean(key));
     toggle.setAttribute("aria-label", key ? "API key set: change or forget it" : "Set your API key");
   }
   const forget = $("#key-forget");

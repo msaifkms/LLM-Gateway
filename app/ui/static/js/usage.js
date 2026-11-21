@@ -1,4 +1,4 @@
-import { $, api, el, fmtInt, fmtUsd, getKey, hideAlert, onKeyChange, showError } from "./common.js";
+import { $, api, el, fmtInt, fmtUsd, getKey, hideAlert, icon, onKeyChange, showError } from "./common.js";
 
 const SVG = "http://www.w3.org/2000/svg";
 const errorBox = $("#usage-error");
@@ -38,10 +38,11 @@ function dayLabel(iso, withYear = false) {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: withYear ? "numeric" : undefined, timeZone: "UTC" });
 }
 
-function stat(label, value, sub) {
-  return el("div", { class: "card stat" },
-    el("p", { class: "stat-label", text: label }),
+function stat(label, value, sub, iconName, hero = false) {
+  return el("div", { class: hero ? "card stat stat-hero" : "card stat" },
+    el("span", { class: "stat-icon" }, icon(iconName)),
     el("p", { class: "stat-value", text: value }),
+    el("p", { class: "stat-label", text: label }),
     sub ? el("p", { class: "stat-sub", text: sub }) : null,
   );
 }
@@ -49,10 +50,10 @@ function stat(label, value, sub) {
 function renderStats(totals) {
   const tokens = totals.prompt_tokens + totals.completion_tokens;
   stats.replaceChildren(
-    stat("Requests", fmtInt(totals.requests), `${fmtInt(totals.cache_served)} served from cache`),
-    stat("Tokens", fmtInt(tokens), `${fmtInt(totals.prompt_tokens)} in, ${fmtInt(totals.completion_tokens)} out`),
-    stat("Cost", fmtUsd(totals.cost_usd), "what you were charged"),
-    stat("Saved by cache", fmtUsd(totals.saved_usd), "cost avoided by cache hits"),
+    stat("Requests", fmtInt(totals.requests), `${fmtInt(totals.cache_served)} served from cache`, "list", true),
+    stat("Tokens", fmtInt(tokens), `${fmtInt(totals.prompt_tokens)} in, ${fmtInt(totals.completion_tokens)} out`, "layers"),
+    stat("Cost", fmtUsd(totals.cost_usd), "what you were charged", "dollar"),
+    stat("Saved by cache", fmtUsd(totals.saved_usd), "cost avoided by cache hits", "piggy"),
   );
 }
 
@@ -76,10 +77,63 @@ function svg(tag, attrs = {}) {
   return node;
 }
 
-/** A bar whose top corners are rounded and whose base sits flat on the axis. */
-function barPath(x, y, w, h) {
-  const r = Math.min(4, w / 2, h);
-  return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
+/**
+ * A smooth path through the points (monotone cubic, Fritsch-Carlson): it never
+ * overshoots, so a day of zero never dips below the axis between two busy days.
+ */
+function monotonePath(points) {
+  const n = points.length;
+  if (n === 0) return "";
+  if (n === 1) return `M${points[0][0]},${points[0][1]}`;
+  const dx = [];
+  const slope = [];
+  for (let i = 0; i < n - 1; i += 1) {
+    dx.push(points[i + 1][0] - points[i][0]);
+    slope.push((points[i + 1][1] - points[i][1]) / dx[i]);
+  }
+  const tangent = [slope[0]];
+  for (let i = 1; i < n - 1; i += 1) {
+    tangent.push(slope[i - 1] * slope[i] <= 0 ? 0 : (slope[i - 1] + slope[i]) / 2);
+  }
+  tangent.push(slope[n - 2]);
+  for (let i = 0; i < n - 1; i += 1) {
+    if (slope[i] === 0) {
+      tangent[i] = 0;
+      tangent[i + 1] = 0;
+    } else {
+      const a = tangent[i] / slope[i];
+      const b = tangent[i + 1] / slope[i];
+      const h = a * a + b * b;
+      if (h > 9) {
+        const t = 3 / Math.sqrt(h);
+        tangent[i] = t * a * slope[i];
+        tangent[i + 1] = t * b * slope[i];
+      }
+    }
+  }
+  let d = `M${points[0][0]},${points[0][1]}`;
+  for (let i = 0; i < n - 1; i += 1) {
+    const [x0, y0] = points[i];
+    const [x1, y1] = points[i + 1];
+    const third = dx[i] / 3;
+    d += `C${x0 + third},${y0 + tangent[i] * third} ${x1 - third},${y1 - tangent[i + 1] * third} ${x1},${y1}`;
+  }
+  return d;
+}
+
+/**
+ * Gradients in plot coordinates (userSpaceOnUse): a bounding-box gradient
+ * renders nothing on a perfectly flat line, such as a week with no traffic.
+ */
+function gradientDefs(left, right, top, bottom) {
+  const defs = svg("defs");
+  const space = { gradientUnits: "userSpaceOnUse" };
+  const line = svg("linearGradient", { id: "usage-line", ...space, x1: left, y1: 0, x2: right, y2: 0 });
+  line.append(svg("stop", { offset: "0%", class: "stop-a" }), svg("stop", { offset: "100%", class: "stop-b" }));
+  const area = svg("linearGradient", { id: "usage-area", ...space, x1: 0, y1: top, x2: 0, y2: bottom });
+  area.append(svg("stop", { offset: "0%", class: "stop-fill-top" }), svg("stop", { offset: "100%", class: "stop-fill-bottom" }));
+  defs.append(line, area);
+  return defs;
 }
 
 function renderChart() {
@@ -87,14 +141,15 @@ function renderChart() {
   chartTitle.textContent = metric.title;
   const values = days.map(metric.value);
   const width = Math.max(chartBox.clientWidth, 280);
-  const height = 240;
-  const pad = { top: 12, right: 8, bottom: 28, left: 56 };
+  const height = 260;
+  const pad = { top: 16, right: 14, bottom: 30, left: 58 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
   const step = niceStep(Math.max(...values, 0), metricSelect.value !== "cost");
   const top = step * TICKS;
-  const slot = plotW / Math.max(values.length, 1);
-  const barW = Math.max(2, Math.min(48, slot - 2)); // 2px surface gap between bars
+  const xAt = (i) => pad.left + (values.length > 1 ? (i / (values.length - 1)) * plotW : plotW / 2);
+  const yAt = (v) => pad.top + plotH - (top > 0 ? (v / top) * plotH : 0);
+  const points = values.map((v, i) => [xAt(i), yAt(v)]);
 
   const root = svg("svg", { viewBox: `0 0 ${width} ${height}`, role: "img", tabindex: 0 });
   const total = values.reduce((a, b) => a + b, 0);
@@ -102,75 +157,93 @@ function renderChart() {
     "aria-label",
     `${metric.title}, ${days.length} days, total ${metric.format(total)}. Use the left and right arrow keys to read each day, or open the table below.`,
   );
+  root.append(gradientDefs(pad.left, width - pad.right, pad.top, pad.top + plotH));
 
   const grid = svg("g", { class: "grid" });
   const axis = svg("g", { class: "axis" });
   for (let i = 0; i <= TICKS; i += 1) {
     const v = step * i;
-    const y = pad.top + plotH - (v / top) * plotH;
+    const y = yAt(v);
     grid.append(svg("line", { x1: pad.left, x2: width - pad.right, y1: y, y2: y }));
-    const label = svg("text", { x: pad.left - 8, y: y + 4, "text-anchor": "end" });
+    const label = svg("text", { x: pad.left - 10, y: y + 4, "text-anchor": "end" });
     label.textContent = metric.format(v);
     axis.append(label);
   }
-
-  // Label at most ~7 days so the dates never collide.
-  const every = Math.max(1, Math.ceil(values.length / Math.max(1, Math.floor(plotW / 70))));
-  const bars = svg("g");
+  // Label evenly spaced days plus the last one, never two that would collide.
+  const every = Math.max(1, Math.ceil(values.length / Math.max(1, Math.floor(plotW / 74))));
+  const labelled = days.map((_, i) => i).filter((i) => i % every === 0);
+  const last = values.length - 1;
+  if (labelled[labelled.length - 1] !== last) {
+    if (labelled.length > 1 && last - labelled[labelled.length - 1] < every) labelled.pop();
+    labelled.push(last);
+  }
   days.forEach((d, i) => {
-    const v = values[i];
-    const h = top > 0 ? (v / top) * plotH : 0;
-    const x = pad.left + i * slot + (slot - barW) / 2;
-    const y = pad.top + plotH - h;
-    const group = svg("g", { class: "bar-group", "data-index": i });
-    if (h > 0) group.append(svg("path", { class: "bar", d: barPath(x, y, barW, Math.max(h, 1)) }));
-    // A hit area the full height of the slot, bigger than the bar itself.
-    group.append(svg("rect", { class: "bar-hit", x: pad.left + i * slot, y: pad.top, width: slot, height: plotH }));
-    bars.append(group);
-    if (i % every === 0 || i === values.length - 1) {
-      const label = svg("text", { x: x + barW / 2, y: height - 8, "text-anchor": "middle" });
+    if (labelled.includes(i)) {
+      const label = svg("text", { x: xAt(i), y: height - 8, "text-anchor": i === 0 && values.length > 1 ? "start" : i === values.length - 1 && values.length > 1 ? "end" : "middle" });
       label.textContent = dayLabel(d.day);
       axis.append(label);
     }
   });
-  grid.append(svg("line", { x1: pad.left, x2: width - pad.right, y1: pad.top + plotH, y2: pad.top + plotH }));
 
-  root.append(grid, bars, axis);
+  const curve = monotonePath(points);
+  const baseline = pad.top + plotH;
+  const area = svg("path", {
+    d: `${curve}L${points[points.length - 1][0]},${baseline}L${points[0][0]},${baseline}Z`,
+    fill: "url(#usage-area)",
+  });
+  const line = svg("path", { d: curve, class: "line", stroke: "url(#usage-line)" });
+  const hoverLine = svg("line", { class: "hover-line", y1: pad.top, y2: baseline, x1: 0, x2: 0 });
+  const dot = svg("circle", { class: "dot", r: 5.5, cx: 0, cy: 0 });
+  const hit = svg("rect", { class: "hit", x: pad.left - 10, y: pad.top, width: plotW + 20, height: plotH });
+
+  root.append(grid, area, line, hoverLine, dot, axis, hit);
   const tip = el("div", { class: "tooltip", hidden: true, role: "status" });
 
   const show = (i) => {
     if (i === null || i < 0 || i >= days.length) {
       tip.hidden = true;
-      bars.querySelectorAll(".active").forEach((g) => g.classList.remove("active"));
+      dot.classList.remove("active");
+      hoverLine.classList.remove("active");
       current = null;
       return;
     }
     current = i;
-    bars.querySelectorAll(".bar-group").forEach((g) => g.classList.toggle("active", Number(g.dataset.index) === i));
+    const [x, y] = points[i];
+    dot.setAttribute("cx", x);
+    dot.setAttribute("cy", y);
+    dot.classList.add("active");
+    hoverLine.setAttribute("x1", x);
+    hoverLine.setAttribute("x2", x);
+    hoverLine.classList.add("active");
     tip.replaceChildren(el("strong", { text: metric.format(values[i]) }), el("span", { text: dayLabel(days[i].day, true) }));
-    const xPx = ((pad.left + i * slot + slot / 2) / width) * chartBox.clientWidth;
-    const yPx = ((pad.top + plotH - (top > 0 ? (values[i] / top) * plotH : 0)) / height) * root.getBoundingClientRect().height;
-    // Keep the tooltip inside the chart: below the point near the top edge,
-    // and clear of the left and right edges.
-    tip.classList.toggle("below", yPx < 64);
+    const scale = chartBox.clientWidth / width;
+    const yPx = y * (root.getBoundingClientRect().height / height);
+    tip.classList.toggle("below", yPx < 70);
     const half = 70;
-    tip.style.left = `${Math.min(Math.max(xPx, half), chartBox.clientWidth - half)}px`;
+    tip.style.left = `${Math.min(Math.max(x * scale, half), chartBox.clientWidth - half)}px`;
     tip.style.top = `${yPx}px`;
     tip.hidden = false;
   };
 
-  bars.addEventListener("pointermove", (event) => {
-    const group = event.target.closest(".bar-group");
-    show(group ? Number(group.dataset.index) : null);
-  });
+  const nearest = (clientX) => {
+    const rect = root.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * width;
+    let best = 0;
+    for (let i = 1; i < points.length; i += 1) {
+      if (Math.abs(points[i][0] - x) < Math.abs(points[best][0] - x)) best = i;
+    }
+    return best;
+  };
+
+  hit.addEventListener("pointermove", (event) => show(nearest(event.clientX)));
   root.addEventListener("pointerleave", () => show(null));
   root.addEventListener("blur", () => show(null));
   root.addEventListener("keydown", (event) => {
     if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
       event.preventDefault();
-      const step = event.key === "ArrowRight" ? 1 : -1;
-      const start = current === null ? (step > 0 ? -1 : days.length) : current;
-      show(Math.min(days.length - 1, Math.max(0, start + step)));
+      const delta = event.key === "ArrowRight" ? 1 : -1;
+      const from = current === null ? (delta > 0 ? -1 : days.length) : current;
+      show(Math.min(days.length - 1, Math.max(0, from + delta)));
     } else if (event.key === "Escape") {
       show(null);
     }
@@ -180,9 +253,10 @@ function renderChart() {
 }
 
 function table(headers, rows, numeric) {
-  return el("table", {},
+  // "stacked": on phones each row becomes a small card labelled by column.
+  return el("table", { class: "stacked" },
     el("thead", {}, el("tr", {}, headers.map((h, i) => el("th", { class: numeric.includes(i) ? "num" : null, scope: "col", text: h })))),
-    el("tbody", {}, rows.map((r) => el("tr", {}, r.map((c, i) => el("td", { class: numeric.includes(i) ? "num" : null, text: c }))))),
+    el("tbody", {}, rows.map((r) => el("tr", {}, r.map((c, i) => el("td", { class: numeric.includes(i) ? "num" : null, "data-label": headers[i], text: c }))))),
   );
 }
 
