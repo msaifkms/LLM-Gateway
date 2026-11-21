@@ -36,9 +36,15 @@ def log(message: str) -> None:
 def fresh(name: str, keys: dict[str, str], *args: str) -> dict[str, object]:
     """Run one scenario inside the Compose network, on a freshly restarted gateway."""
     stack.restart_gateway()
-    started = time.perf_counter()
+    started, wall = time.perf_counter(), time.time()
     result = stack.run_in_network([name, *args], keys)
-    result["seconds_total"] = round(time.perf_counter() - started, 1)
+    elapsed = time.perf_counter() - started
+    result["seconds_total"] = round(elapsed, 1)
+    # perf_counter stops while macOS sleeps; the wall clock does not. A gap means
+    # the machine slept (pausing Docker) during the scenario: discard the run.
+    result["sleep_gap_s"] = round((time.time() - wall) - elapsed, 1)
+    if result["sleep_gap_s"] > 2:
+        log(f"WARNING: the machine slept for {result['sleep_gap_s']} s during {name}")
     return result
 
 
