@@ -1,0 +1,22 @@
+# Override for the benchmark suite: the normal stack plus the benchmark-only
+# Mock targets and routes (bench-delay-50, bench-fallback, bench-priced).
+#   docker compose -f docker-compose.yml -f bench/docker-compose.bench.yml up -d --build
+# python -m bench does this for you.
+services:
+  gateway:
+    environment:
+      GATEWAY_BENCH_MODE: "true"
+
+  # Runs the scenarios inside the Compose network, so requests reach the
+  # gateway directly instead of through Docker Desktop's port forwarding.
+  # Same image as the gateway (it already has httpx and prometheus-client).
+  bench-client:
+    build: .
+    profiles: ["bench"]
+    entrypoint: ["python", "-m", "bench.client"]
+    environment:
+      BENCH_BASE_URL: http://gateway:8000
+    volumes:
+      - ./bench:/app/bench:ro
+    depends_on:
+      - gateway
