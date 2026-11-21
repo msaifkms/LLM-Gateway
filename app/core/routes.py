@@ -41,3 +41,15 @@ DEFAULT_ROUTES: dict[str, Route] = {
     "openai-default": Route(targets=("openai-default",)),
     "anthropic-default": Route(targets=("anthropic-default",)),
 }
+
+#: Extra routes for the benchmark suite, only with GATEWAY_BENCH_MODE=true.
+BENCH_ROUTES: dict[str, Route] = {
+    "bench-delay-50": Route(targets=("mock-delay-50",)),
+    # Primary always fails; the healthy Mock answers instead.
+    "bench-fallback": Route(targets=("mock-down", "mock-1")),
+    "bench-priced": Route(targets=("mock-priced",)),
+}
+
+
+def build_routes(*, bench: bool = False) -> dict[str, Route]:
+    return DEFAULT_ROUTES | BENCH_ROUTES if bench else dict(DEFAULT_ROUTES)

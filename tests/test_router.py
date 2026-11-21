@@ -3,6 +3,7 @@ import random
 import time
 
 import pytest
+from helpers import FakeClock
 
 from app.api.schemas import ChatCompletionRequest, ChatMessage
 from app.core.router import Router, RouteResult
@@ -18,17 +19,6 @@ from app.resilience.errors import (
 REQUEST = ChatCompletionRequest(
     model="r", messages=[ChatMessage(role="user", content="Hi")]
 )
-
-
-class FakeClock:
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
-
-    async def sleep(self, delay: float) -> None:
-        self.now += delay
 
 
 def make_router(

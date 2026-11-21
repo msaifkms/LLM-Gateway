@@ -19,7 +19,7 @@ from app.core.ratelimit import RateLimiter
 from app.core.redis_client import check_redis, create_redis
 from app.core.request_context import RequestContextMiddleware
 from app.core.router import Router
-from app.core.routes import DEFAULT_ROUTES
+from app.core.routes import build_routes
 from app.core.singleflight import SingleFlight
 from app.db.pool import check_db, create_db_pool
 from app.evals.scoreboard import EvalScoreboard
@@ -38,7 +38,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         timeout=httpx.Timeout(30.0, connect=5.0),
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
     ) as http_client:
-        app.state.router = Router(DEFAULT_ROUTES, build_providers(http_client))
+        app.state.router = Router(
+            build_routes(bench=settings.bench_mode),
+            build_providers(http_client, bench=settings.bench_mode),
+        )
         app.state.singleflight = SingleFlight()
 
         db = (

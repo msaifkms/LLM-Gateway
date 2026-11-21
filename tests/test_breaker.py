@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from helpers import FakeClock
 
 from app.api.schemas import ChatCompletionRequest, ChatMessage
 from app.providers.mock import FailureMode, MockProvider
@@ -12,23 +13,10 @@ from app.resilience.errors import (
 )
 
 
-class Clock:
-    """Manual clock: time only moves when the test says so."""
-
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
-
-    def advance(self, seconds: float) -> None:
-        self.now += seconds
-
-
 def make_breaker(
     threshold: int = 3, timeout: float = 10.0, probes: int = 1
-) -> tuple[CircuitBreaker, Clock]:
-    clock = Clock()
+) -> tuple[CircuitBreaker, FakeClock]:
+    clock = FakeClock()
     config = BreakerConfig(
         failure_threshold=threshold,
         recovery_timeout_s=timeout,

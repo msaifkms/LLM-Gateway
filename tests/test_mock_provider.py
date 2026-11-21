@@ -48,3 +48,17 @@ def test_mock_implements_provider_interface() -> None:
     provider: LLMProvider = MockProvider()
 
     assert callable(provider.complete)
+
+
+def test_the_mock_can_report_a_model_and_token_counts() -> None:
+    mock = MockProvider(
+        model_name="gpt-4.1-mini", prompt_tokens=10, completion_tokens=4
+    )
+    request = ChatCompletionRequest(
+        model="alias", messages=[ChatMessage(role="user", content="hi")]
+    )
+
+    response = asyncio.run(mock.complete(request))
+
+    assert response.model == "gpt-4.1-mini"
+    assert (response.usage.prompt_tokens, response.usage.total_tokens) == (10, 14)

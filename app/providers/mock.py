@@ -63,8 +63,16 @@ class MockProvider:
         failure_rate: float = 1.0,
         retry_after_s: float = 1.0,
         seed: int | None = None,
+        model_name: str | None = None,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
     ) -> None:
         self.response_text = response_text
+        #: Report this model (instead of the alias) and these token counts, so
+        #: the usual price table applies. Used to simulate cost in benchmarks.
+        self.model_name = model_name
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
         self.latency_s = latency_s
         self.failure_mode = failure_mode
         self.failure_rate = failure_rate
@@ -96,7 +104,7 @@ class MockProvider:
         return ChatCompletionResponse(
             id=f"chatcmpl-mock-{uuid.uuid4().hex}",
             created=int(time.time()),
-            model=request.model,
+            model=self.model_name or request.model,
             choices=[
                 ChatChoice(
                     index=0,
@@ -108,8 +116,8 @@ class MockProvider:
                 )
             ],
             usage=TokenUsage(
-                prompt_tokens=0,
-                completion_tokens=0,
-                total_tokens=0,
+                prompt_tokens=self.prompt_tokens,
+                completion_tokens=self.completion_tokens,
+                total_tokens=self.prompt_tokens + self.completion_tokens,
             ),
         )

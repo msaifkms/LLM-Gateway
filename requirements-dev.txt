@@ -4,20 +4,33 @@
 
 # Direct
 boto3-stubs[ssm]==1.44.7
+httpx2==2.16.2  # Starlette's TestClient uses it (the gateway itself uses httpx)
+matplotlib==3.11.2  # benchmark charts only (python -m bench report)
 mypy==2.4.1
 pytest==9.2.0
 pytest-asyncio==1.4.1
+pytest-cov==7.1.0
 ruff==0.17.4  # keep in step with .pre-commit-config.yaml
 
 # Transitive
 ast-serialize==0.13.1
 botocore-stubs==1.43.126
+contourpy==1.4.0
+coverage==7.17.4
+cycler==0.12.1
+fonttools==4.68.0
+httpcore2==2.16.2
 iniconfig==2.3.1
+kiwisolver==1.5.1
 librt==0.17.0
 mypy-boto3-ssm==1.44.3
 mypy-extensions==1.2.0
+numpy==2.5.5
 packaging==26.3
 pathspec==1.1.1
+pillow==13.0.0
 pluggy==1.7.0
 pygments==2.21.0
+pyparsing==3.3.3
+truststore==0.10.5
 types-s3transfer==0.19.3

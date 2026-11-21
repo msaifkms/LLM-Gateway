@@ -1,0 +1,62 @@
+{
+ "measured_utc": "2026-11-21T03:30:13Z",
+ "requests_per_route": 10,
+ "machine": {
+  "host_os": "Darwin 15.6.1",
+  "host_model": "Mac15,12",
+  "host_cpu": "Apple M3",
+  "host_cpu_cores": "8",
+  "host_memory_gib": "16",
+  "docker_server": "29.9.2",
+  "docker_vm_cpus": "8",
+  "docker_vm_memory_gib": "7.7",
+  "docker_os": "Docker Desktop",
+  "compose": "5.6.1",
+  "client_python": "3.13.3",
+  "gateway_python": "Python 3.12.16",
+  "power": "Battery Power",
+  "postgres_image": "postgres:16",
+  "redis_image": "redis:7-alpine"
+ },
+ "results": [
+  {
+   "route": "openai-default",
+   "models": [
+    "gpt-4.1-mini-2025-04-14"
+   ],
+   "statuses": {
+    "200": 10
+   },
+   "server_mean_ms": 790.916,
+   "provider_mean_ms": 781.538,
+   "gateway_own_mean_ms": 9.378,
+   "cost_usd": "0.00029760",
+   "n": 10,
+   "p50_ms": 610.012,
+   "p95_ms": 1403.606,
+   "p99_ms": 1644.975,
+   "mean_ms": 799.193,
+   "max_ms": 1705.317
+  },
+  {
+   "route": "anthropic-default",
+   "models": [
+    "claude-haiku-5-5"
+   ],
+   "statuses": {
+    "200": 10
+   },
+   "server_mean_ms": 937.826,
+   "provider_mean_ms": 927.993,
+   "gateway_own_mean_ms": 9.833,
+   "cost_usd": "0.00021500",
+   "n": 10,
+   "p50_ms": 716.912,
+   "p95_ms": 2056.199,
+   "p99_ms": 2881.737,
+   "mean_ms": 943.455,
+   "max_ms": 3088.122
+  }
+ ],
+ "total_cost_usd": "0.00051260"
+}

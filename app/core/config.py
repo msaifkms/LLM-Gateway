@@ -75,6 +75,8 @@ class Settings:
     db_pool_max: int = DEFAULT_DB_POOL_MAX
     #: If Redis is down: True lets requests through unlimited, False refuses them.
     rate_limit_fail_open: bool = True
+    #: Add the benchmark-only Mock targets and routes (never in production).
+    bench_mode: bool = False
 
     @classmethod
     def from_env(cls) -> Self:
@@ -91,6 +93,7 @@ class Settings:
         if pool_max <= 0:
             raise ValueError("DB_POOL_MAX must be a positive integer")
         fail_open = _parse_bool("RATE_LIMIT_FAIL_OPEN", default=True)
+        bench_mode = _parse_bool("GATEWAY_BENCH_MODE", default=False)
 
         return cls(
             redis_url=redis_url or None,
@@ -99,4 +102,5 @@ class Settings:
             database_url=database_url or None,
             db_pool_max=pool_max,
             rate_limit_fail_open=fail_open,
+            bench_mode=bench_mode,
         )

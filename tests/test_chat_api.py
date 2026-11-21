@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
+from helpers import FakeClock
 
 from app.api.chat import get_router
 from app.core.router import Router
@@ -23,17 +24,6 @@ from app.resilience.errors import (
 )
 
 HELLO = {"role": "user", "content": "Hello!"}
-
-
-class FakeClock:
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
-
-    async def sleep(self, delay: float) -> None:
-        self.now += delay
 
 
 def use_router(monkeypatch: pytest.MonkeyPatch, overrides: dict[str, object]) -> None:

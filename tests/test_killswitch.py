@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 import pytest
+from helpers import FakeClock
 
 from app.core.killswitch import (
     KillSwitch,
@@ -27,16 +28,8 @@ class FakeFlagStore:
         return KillSwitchState(self.enabled, self.reason)
 
 
-class Clock:
-    def __init__(self) -> None:
-        self.now = 1000.0
-
-    def __call__(self) -> float:
-        return self.now
-
-
-def make(store: FakeFlagStore, ttl_s: float = 2.0) -> tuple[KillSwitch, Clock]:
-    clock = Clock()
+def make(store: FakeFlagStore, ttl_s: float = 2.0) -> tuple[KillSwitch, FakeClock]:
+    clock = FakeClock(1000.0)
     return KillSwitch(store, ttl_s=ttl_s, clock=clock), clock  # type: ignore[arg-type]
 
 

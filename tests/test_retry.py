@@ -3,6 +3,7 @@ import random
 from collections.abc import Awaitable, Callable
 
 import pytest
+from helpers import FakeClock
 
 from app.api.schemas import ChatCompletionRequest, ChatMessage
 from app.providers.mock import FailureMode, MockProvider
@@ -14,21 +15,6 @@ from app.resilience.errors import (
     ProviderServerError,
 )
 from app.resilience.retry import RetryPolicy, call_with_retry, compute_delay
-
-
-class FakeClock:
-    """A clock whose sleep() advances time instantly instead of waiting."""
-
-    def __init__(self) -> None:
-        self.now = 0.0
-        self.sleeps: list[float] = []
-
-    def __call__(self) -> float:
-        return self.now
-
-    async def sleep(self, delay: float) -> None:
-        self.sleeps.append(delay)
-        self.now += delay
 
 
 class Flaky:
