@@ -1,25 +1,28 @@
 # LLM Gateway with Evaluation Harness
 
-LLM Gateway is a service that sits between an application and AI model providers such as OpenAI and Anthropic. The application sends every request to one place, and the gateway checks who is calling, limits how much they can use, reuses answers it has already paid for, switches to a backup provider when one fails, and records what each request cost. It also includes an evaluation harness that scores the answers, so different models can be compared on the same questions.
+An HTTP service that sits between applications and LLM providers (OpenAI, Anthropic, and a built-in Mock). Every request goes through one API that checks the caller's key, enforces rate limits and quotas, reuses answers it has already paid for, falls back to another provider when one fails, and records what each request cost. It includes an evaluation harness that scores model answers through the same API, a small web UI, Prometheus metrics with a Grafana dashboard, and Terraform for running it on AWS.
 
-**Highlights**
+**Highlights** (all measured; methods and caveats are in the linked docs)
 
-- **721 automated tests.** 669 run anywhere, and 52 more run against real Redis and PostgreSQL. CI runs all of them on every push.
-- **Failover.** In a test where the primary provider fails every call, all 100 requests are answered by the backup provider. The circuit breaker opens after 5 failures, so the failing provider is called 5 times in total.
-- **Caching.** A repeated request is answered from Redis without calling a provider, and costs $0. When 8 identical cacheable requests arrive at once, the gateway makes 1 provider call and gives all 8 the same answer.
-- **Answer quality.** On the 27 starter eval cases, OpenAI `gpt-4.1-mini` passed 27 and Anthropic `claude-haiku-5-5` passed 26. The whole run cost $0.0026, and the harness's cost figures matched the gateway's own billing records.
-- **A quality gate in CI.** Every push starts a real gateway, issues an API key, runs an eval against the Mock provider, and fails the build if the pass rate drops below 100%.
-- **Observable.** 20 Prometheus metrics, all on a Grafana dashboard generated from code. A test fails if any metric is missing from it.
-- **Deployable to AWS for about $1.65 a day.** Terraform defines ECS Fargate, a load balancer, RDS PostgreSQL and optional Redis in `us-east-2`, with no NAT Gateway, no secrets in Terraform state, and `/metrics` blocked at the load balancer. One script deploys, and one command tears it all down.
+- **Low overhead.** Through the full pipeline (key lookup in Postgres, rate limit in Redis, routing, usage write) a request to a zero-latency Mock took a median of 1.5 ms end to end, of which 1.2 ms was the gateway's own time. Real OpenAI and Anthropic calls took a median of 610 ms and 717 ms in a small sample, so the gateway was about 1% of a real request. [Benchmarks](docs/benchmarks.md)
+- **Throughput.** One worker process handled 828–848 requests per second at 10 and 50 concurrent requests, with 0 errors (Docker Desktop on an M3 laptop, Mock provider; not a production figure).
+- **Caching.** A cache hit took a median of 1.8 ms against 213.5 ms for a miss. On 1,000 requests with a realistic repeated-prompt mix, 84.5% were answered from the cache and the provider was called 155 times; at `gpt-4.1-mini` prices (simulated tokens) the bill went from $0.52 to $0.08.
+- **Single-flight.** 50 identical requests arriving at once made 1 provider call (50 with the cache bypassed), in each of three runs.
+- **Failover.** With the primary provider failing every call, 200 of 200 requests succeeded through the fallback. The circuit breaker opened after 5 failures, so the failing provider was called 5 times in total, and once it was open a fallback request took 1.7 ms against 1.6 ms on a healthy route.
+- **Rate limiting.** Offered 50 requests per second for a minute against a limit of 120 per minute, the Redis token bucket allowed 239, against 240 expected from its formula.
+- **Answer quality.** On the 27 starter eval cases, OpenAI `gpt-4.1-mini` passed 27 and Anthropic `claude-haiku-5-5` passed 26, for $0.0026; the harness's cost figures matched the gateway's billing records. CI runs an eval against the Mock on every push and fails below a 100% pass rate.
+- **Tested.** 737 automated tests (685 run anywhere, 52 more against real Redis and PostgreSQL), 96% line and branch coverage of `app/`, with a 90% gate in CI.
+- **Deployed to AWS.** Terraform (ECS Fargate, ALB, RDS PostgreSQL, optional Redis, no NAT Gateway, no secrets in state) was applied, smoke-tested and destroyed on the same day, with nothing left in the account afterwards; estimated at about $1.65 a day while running. [Deployment](docs/deploy.md)
 
 ```mermaid
 flowchart LR
     app[Client application] -->|HTTP + API key| gateway
+    ui["Web UI<br/>/ui"] -->|same API + API key| gateway
     evals["Eval harness<br/>python -m app.evals"] -->|same API + API key| gateway
 
     subgraph gateway[Gateway - FastAPI]
         direction LR
-        auth[Auth] --> limit[Rate limit] --> cache[Cache] --> router["Router<br/>retries, breakers, fallback"]
+        auth[Auth] --> limit[Rate limit] --> cache[Cache +<br/>single-flight] --> router["Router<br/>retries, breakers, fallback"]
     end
 
     router --> openai[OpenAI]
@@ -28,15 +31,82 @@ flowchart LR
 
     limit <--> redis[(Redis)]
     cache <--> redis
-    auth <--> postgres[("PostgreSQL<br/>keys, usage, eval results")]
+    auth <--> postgres[("PostgreSQL<br/>keys, usage, quotas,<br/>kill switch, eval results")]
     evals --> postgres
     prometheus[Prometheus] -->|scrapes /metrics| gateway
     grafana[Grafana] --> prometheus
 ```
 
-The current implementation supports OpenAI, Anthropic, and a Mock provider through one standardized endpoint. It adds priority fallback routing, retries, circuit breakers, a Redis response cache, API key authentication, per-key rate limits, daily quotas, per-request cost tracking, a global kill switch, structured logs, Prometheus metrics, a Grafana dashboard, and an evaluation harness that measures answer quality through the gateway's own API.
+| Web UI (Playground) | Grafana dashboard |
+|---|---|
+| ![Web UI Playground](docs/ui/playground-light.png) | ![Grafana dashboard](docs/dashboard.png) |
 
-![LLM Gateway dashboard](docs/dashboard.png)
+## Try it in 5 minutes
+
+You need Docker. No provider keys are needed: the Mock provider answers.
+
+```bash
+git clone https://github.com/msaifkms/LLM-Gateway.git && cd LLM-Gateway
+cp .env.example .env
+docker compose up --build -d
+docker compose run --rm gateway python -m app.db.migrate
+
+docker compose run --rm gateway python -m app.cli create-user demo
+docker compose run --rm gateway python -m app.cli issue-key demo   # prints the key once
+export KEY=llmgw_...                                                # paste it here
+```
+
+1. Open http://localhost:8000/ui, paste the key, and send a message to `mock-1` in the Playground. Send it again at temperature 0 to see `X-Cache: HIT`.
+2. Run an eval through the gateway, then open the **Evals** page:
+
+   ```bash
+   EVAL_API_KEY=$KEY docker compose run --rm evals run --dataset mock_smoke --model mock-1
+   ```
+
+3. Or call the API directly:
+
+   ```bash
+   curl -s http://localhost:8000/v1/chat/completions -H "Authorization: Bearer $KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"mock-1","messages":[{"role":"user","content":"Hello!"}],"temperature":0}'
+   ```
+
+For metrics, start `docker compose --profile observability up -d` and open Grafana at http://localhost:3000. Stop everything with `docker compose --profile observability down`.
+
+## Project structure
+
+```
+app/
+  api/          HTTP endpoints: chat, usage, models, eval results, metrics
+  auth/         API keys (hashed), admin operations, SSM key hand-off
+  core/         config, routes, router, cache, single-flight, rate limiter, kill switch, logs, metrics
+  db/           connection pool and numbered SQL migrations
+  evals/        evaluation harness: datasets, scorers, LLM judge, runner, reports, CLI
+  providers/    OpenAI, Anthropic and Mock providers
+  resilience/   error taxonomy, retries with backoff, circuit breaker
+  usage/        prices, cost calculation, usage recording, quotas
+  ui/           the web UI (static HTML, CSS and JavaScript)
+  cli.py        admin CLI (users, keys, limits, kill switch)
+  main.py       FastAPI app and startup wiring
+bench/          benchmark suite (python -m bench)
+infra/          Terraform for AWS, plus deploy and one-off task scripts
+ops/            Prometheus config and the Grafana dashboard generator
+tests/          unit, API, fault-injection and real Redis/Postgres tests
+docs/           design, benchmarks, deployment, evals, cleanup notes, screenshots
+```
+
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [docs/benchmarks.md](docs/benchmarks.md) | Measured overhead, cache, single-flight, resilience and rate-limiter results, with the method and machine |
+| [docs/design.md](docs/design.md) | Key design decisions and trade-offs, in short ADR form |
+| [docs/deploy.md](docs/deploy.md) | AWS deployment with Terraform, step by step, with costs and teardown |
+| [docs/evals/README.md](docs/evals/README.md) | Dataset format, every scorer, and sample eval reports |
+| [docs/CLEANUP.md](docs/CLEANUP.md) | What has been tidied up, and what is deliberately left for later |
+| [bench/README.md](bench/README.md) | How the benchmark suite works |
+
+The sections below are the detailed reference.
 
 ## Features
 
@@ -81,11 +151,12 @@ The current implementation supports OpenAI, Anthropic, and a Mock provider throu
 - Pinned dependencies (`requirements.txt`, `requirements-dev.txt`)
 - CI checks for Terraform (`fmt`, `validate`, `tflint`) and the deploy scripts (`shellcheck`)
 - A web UI at `/ui` (Playground, Usage, Evals) with no build step and a strict Content-Security-Policy
+- A benchmark suite (`python -m bench`) for overhead, cache, single-flight, failover and rate-limit accuracy, against the Mock provider
 - Automated unit, API, fault-injection, and real-Redis/Postgres integration tests
 
-**Planned**
+**Not built (see [docs/CLEANUP.md](docs/CLEANUP.md))**
 
-- Benchmarks and final documentation
+- Streaming responses
 - Configurable routes from a YAML file
 - Distributed tracing
 
@@ -97,7 +168,8 @@ The current implementation supports OpenAI, Anthropic, and a Mock provider throu
 - **Observability:** structured JSON logging, Prometheus, Grafana
 - **Infrastructure:** Docker, Docker Compose, Terraform
 - **Cloud:** AWS (ECS Fargate, ALB, RDS, ElastiCache, ECR, SSM Parameter Store, Secrets Manager, CloudWatch Logs, S3)
-- **Testing:** pytest, Ruff, mypy, tflint, shellcheck
+- **Testing:** pytest, pytest-cov, Ruff, mypy, tflint, shellcheck
+- **Benchmarks:** asyncio + HTTPX load client, matplotlib charts
 - **CI:** GitHub Actions (with Redis and Postgres services), pre-commit
 
 ## Request Pipeline
@@ -384,7 +456,7 @@ One run of each starter dataset with `--no-cache`, on OpenAI (`gpt-4.1-mini`) an
 | `instruction_following` | 9/9 | 8/9 (wrote a six-word sentence when asked for five) |
 | `json_output` | 7/7 | 7/7 |
 
-One sample per model is not a benchmark. Repeated runs and larger datasets are planned for Phase 8.
+One sample per model is not a benchmark. Repeated runs on larger datasets are listed as future work in [docs/CLEANUP.md](docs/CLEANUP.md).
 
 ## Admin CLI
 
@@ -418,6 +490,10 @@ In Docker, prefix with `docker compose run --rm gateway`. On AWS, prefix with `i
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Anthropic credentials and model | |
 | `EVAL_API_KEY` | Gateway API key the eval CLI uses (instead of `--key`) | |
 | `GATEWAY_URL` | Gateway the eval CLI calls (instead of `--url`) | `http://localhost:8000` (in the `evals` service: `http://gateway:8000`) |
+
+## Benchmarks
+
+`python -m bench` starts the Compose stack with benchmark-only Mock routes and measures gateway overhead and throughput, cache hits against misses, single-flight, failover with a dead primary, and rate-limiter accuracy. It runs each scenario three times and writes [docs/benchmarks.md](docs/benchmarks.md) with tables and charts. It costs nothing (Mock provider only) and takes about 15 minutes. The numbers are from one laptop running Docker, and the page says so; `python -m bench.real_sample` adds a small, paid sample against the real providers for scale.
 
 ## Deployment
 
@@ -476,8 +552,10 @@ docker run -d --name test-redis -p 6379:6379 redis:7-alpine
 docker run -d --name test-postgres -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=gateway_test postgres:16
 TEST_REDIS_URL=redis://localhost:6379/15 \
 TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/gateway_test \
-python -m pytest -q
+python -m pytest -q --cov
 ```
+
+With `--cov`, pytest-cov reports coverage of `app/` and fails below 90% (the gate in `pyproject.toml`). CI runs it this way, with Redis and Postgres as services, and adds the coverage table to the job summary. Tests treat any warning as an error.
 
 Next time, `docker start test-redis test-postgres` is enough. Stop them before running Docker Compose, since they use the same ports.
 
@@ -510,17 +588,13 @@ The integration tests reset the `gateway_test` database, so run this after them,
 - [x] Phase 5: Observability and metrics
 - [x] Phase 6: Evaluation harness
 - [x] Phase 7: Cloud deployment
-- [ ] Phase 8: Benchmarking and final documentation
+- [x] Phase 8: Benchmarks, design notes and final documentation (v1.0.0)
 
 ## Project Status
 
-**Phase 6 complete.**
+**Version 1.0.0: all eight phases complete.**
 
-Earlier phases made the gateway fast, cheap to run, reliable and observable. Phase 6 adds a way to measure answer quality: datasets of questions run through the gateway like real traffic, every answer is scored by rule or by an LLM judge, and the results are stored, reported, compared run against run, and charted on the dashboard. A model or setting that makes answers worse shows up as flagged cases, and CI fails the build if the harness itself breaks.
-
-A web UI at `/ui` lets a user try the gateway, see their usage and browse their eval runs, with nothing but their API key.
-
-**Phase 7 complete.** The gateway runs on AWS: ECS Fargate behind a load balancer, with RDS PostgreSQL, all defined in Terraform. It was deployed, tested and destroyed on the same day, and a check afterwards found nothing left in the account. See [Deployment](#deployment).
+Phases 1 to 5 built the gateway: one API for several providers, retries, circuit breakers and fallback, a per-user cache with single-flight, keys, rate limits, quotas, cost tracking, a kill switch, logs and metrics. Phase 6 added the evaluation harness, which scores answers through the gateway's own API and gates CI. Phase 7 deployed it to AWS with Terraform, tested it there and tore it down; a web UI followed. Phase 8 measured it: [docs/benchmarks.md](docs/benchmarks.md) has the numbers, [docs/design.md](docs/design.md) the reasons behind the main decisions, and [docs/CLEANUP.md](docs/CLEANUP.md) what is deliberately left for later.
 
 **Current limitations**
 
@@ -545,7 +619,7 @@ A web UI at `/ui` lets a user try the gateway, see their usage and browse their 
 - The Playground sends a single user message, with no system prompt or conversation history.
 - The web UI is for one user and their own key. It has no login of its own, no admin features, and no view across users.
 
-This project is under active development and is not yet intended for production use.
+This is a portfolio project. It has been tested locally, in CI and in one short AWS deployment, but it has not served production traffic.
 
 ## License
 
