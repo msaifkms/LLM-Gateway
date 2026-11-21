@@ -234,7 +234,7 @@ The gateway serves a small web UI at http://localhost:8000/ui. Paste an API key 
 
 More in [docs/ui/](docs/ui/): the dark Playground, the light Usage page, the 429 state, and phone layouts.
 
-It is plain HTML, CSS and a little JavaScript served by FastAPI, with no build step and nothing loaded from another site. Light and dark themes follow the system (or the toggle), the layout works down to phone width, every control has a label, and focus is always visible.
+It is plain HTML, CSS and a little JavaScript served by FastAPI, with no build step and nothing loaded from another site (system fonts, inline SVG icons). The design is dark first, navy-indigo with a violet-to-pink accent, with a matching light theme; both follow the system or the toggle. Every text, badge and control colour meets WCAG AA in both themes (a test checks the colour tokens), animations respect `prefers-reduced-motion`, every control has a label, and focus is always visible. On phones the navigation becomes a bottom bar and tables become labelled cards.
 
 **Security**
 
