@@ -1,5 +1,9 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Each async test gets its own event loop (pytest-asyncio's future default).
+asyncio_default_fixture_loop_scope = "function"
+# Any warning is an error, so new deprecations are fixed when they appear.
+filterwarnings = ["error"]
 
 [tool.ruff]
 line-length = 88
@@ -11,3 +15,13 @@ python_version = "3.12"
 [[tool.mypy.overrides]]
 module = "asyncpg.*"
 ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+# Measured at 96% with the real-service tests (as CI runs them).
+fail_under = 90

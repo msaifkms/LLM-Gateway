@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from helpers import FakeClock
 
 from app.api.metrics import router as metrics_router
 from app.core import metrics
@@ -31,20 +32,12 @@ class FakeSource:
         return self.scores
 
 
-class Clock:
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
-
-
 def sample(name: str, labels: dict[str, str]) -> float | None:
     return metrics.REGISTRY.get_sample_value(name, labels)
 
 
 def test_scores_are_read_at_most_once_per_ttl() -> None:
-    source, clock = FakeSource([score()]), Clock()
+    source, clock = FakeSource([score()]), FakeClock()
     board = EvalScoreboard(source, ttl_s=30, clock=clock)
 
     async def scenario() -> None:
@@ -60,7 +53,7 @@ def test_scores_are_read_at_most_once_per_ttl() -> None:
 
 
 def test_a_failed_read_keeps_the_last_scores_and_waits_a_ttl_to_retry() -> None:
-    source, clock = FakeSource([score()]), Clock()
+    source, clock = FakeSource([score()]), FakeClock()
     board = EvalScoreboard(source, ttl_s=30, clock=clock)
 
     async def scenario() -> None:

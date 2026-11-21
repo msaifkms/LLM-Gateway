@@ -63,8 +63,12 @@ jobs:
       - name: Check types
         run: mypy app
 
-      - name: Run tests
-        run: python -m pytest
+      # The Redis and Postgres services above make every integration test run,
+      # so coverage here is the real number. The gate is in pyproject.toml.
+      - name: Run tests with coverage
+        run: |
+          python -m pytest --cov --cov-report=term --cov-report=markdown:coverage.md
+          { echo "## Coverage"; cat coverage.md; } >> "$GITHUB_STEP_SUMMARY"
 
       # The eval harness, end to end: a real gateway process, a real API key,
       # every request through auth, rate limits and usage tracking. The Mock
