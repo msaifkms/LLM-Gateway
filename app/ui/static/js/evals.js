@@ -1,5 +1,6 @@
-import { $, api, el, fmtDateTime, fmtInt, fmtMs, fmtPct, fmtUsd, getKey, hideAlert, onKeyChange, showError } from "./common.js";
+import { $, api, cacheBadge, el, fmtDateTime, fmtInt, fmtMs, fmtPct, fmtUsd, getKey, hideAlert, icon, onKeyChange, showError } from "./common.js";
 
+const SVG_NS = "http://www.w3.org/2000/svg";
 const view = $("#evals-view");
 const errorBox = $("#evals-error");
 
@@ -7,14 +8,37 @@ function head(title, lede, ...extra) {
   return el("div", { class: "page-head" }, el("div", {}, el("h1", { text: title }), el("p", { class: "lede", text: lede })), ...extra);
 }
 
-function meter(rate, label) {
-  const fill = el("div", { class: "meter-fill" });
-  fill.style.width = `${Math.round((rate || 0) * 100)}%`;
-  return el("span", { class: "meter" }, el("span", { class: "meter-track", "aria-hidden": "true" }, fill), el("span", { text: label }));
+function svg(tag, attrs = {}) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+  return node;
+}
+
+/** Green at 100%, amber in between, rose below half. Always shown with the number. */
+function rateTone(rate) {
+  if (rate === null || rate === undefined) return "var(--surface-3)";
+  if (rate >= 1) return "var(--pass-fg)";
+  if (rate >= 0.5) return "var(--warn-fg)";
+  return "var(--fail-fg)";
+}
+
+/** A pass-rate ring with the percentage in the middle (decorative ring, text label). */
+function ring(rate, large = false) {
+  const r = 26;
+  const length = 2 * Math.PI * r;
+  const filled = Math.max(0, Math.min(1, rate || 0)) * length;
+  const graphic = svg("svg", { viewBox: "0 0 64 64", "aria-hidden": "true", focusable: "false" });
+  graphic.append(svg("circle", { class: "track", cx: 32, cy: 32, r }));
+  if (filled > 0) {
+    const value = svg("circle", { class: "value", cx: 32, cy: 32, r, "stroke-dasharray": `${filled} ${length}` });
+    value.style.stroke = rateTone(rate);
+    graphic.append(value);
+  }
+  return el("span", { class: large ? "ring ring-lg" : "ring" }, graphic, el("span", { class: "ring-label", text: fmtPct(rate) }));
 }
 
 function statusBadge(status) {
-  const cls = status === "completed" ? "badge" : status === "failed" ? "badge badge-fail" : "badge badge-accent";
+  const cls = status === "completed" ? "badge badge-bypass" : status === "failed" ? "badge badge-fail" : "badge badge-coalesced";
   return el("span", { class: cls, text: status });
 }
 
@@ -31,6 +55,23 @@ function runHref(id) {
   return `#run-${id}`;
 }
 
+function runCard(run) {
+  const outcome = run.pass_rate === null ? "no results" : `${run.passed} of ${run.cases} passed`;
+  return el("a", { class: "card run-card", href: runHref(run.id), "aria-label": `Run ${run.id}: ${run.dataset} on ${run.model}, ${outcome}` },
+    ring(run.pass_rate),
+    el("span", { class: "run-body" },
+      el("span", { class: "run-title", text: run.dataset }),
+      el("span", { class: "run-meta" },
+        el("span", { class: "run-id", text: `#${run.id}` }),
+        el("span", { class: "mono", text: run.model }),
+        statusBadge(run.status),
+      ),
+      el("span", { class: "run-meta", text: outcome }),
+      el("span", { class: "run-meta", text: fmtDateTime(run.finished_at || run.started_at) }),
+    ),
+  );
+}
+
 async function showList() {
   document.title = "Evals · LLM Gateway";
   const { data } = await api("/v1/evals/runs?limit=50");
@@ -45,41 +86,19 @@ async function showList() {
     );
     return;
   }
-
-  const rows = data.runs.map((run) => {
-    const link = el("a", { href: runHref(run.id), text: `#${run.id}` });
-    const row = el("tr", { class: "clickable" },
-      td("Run", {}, link),
-      td("Dataset", { text: run.dataset }),
-      td("Model", { class: "mono", text: run.model }),
-      td("Pass rate", {}, run.pass_rate === null ? el("span", { class: "muted", text: "–" }) : meter(run.pass_rate, `${fmtPct(run.pass_rate)} (${run.passed}/${run.cases})`)),
-      td("Status", {}, statusBadge(run.status)),
-      td("Date", { class: "muted", text: fmtDateTime(run.finished_at || run.started_at) }),
-    );
-    // The whole row opens the run; the link inside stays the keyboard target.
-    row.addEventListener("click", (event) => {
-      if (event.target.closest("a")) return;
-      location.hash = runHref(run.id);
-    });
-    return row;
-  });
-
   view.replaceChildren(
     intro,
-    el("section", { class: "card" },
-      el("div", { class: "table-wrap" },
-        el("table", { class: "stacked" },
-          el("caption", { class: "visually-hidden", text: "Recent eval runs" }),
-          el("thead", {}, el("tr", {}, ["Run", "Dataset", "Model", "Pass rate", "Status", "Date"].map((h) => el("th", { scope: "col", text: h })))),
-          el("tbody", {}, rows),
-        ),
-      ),
-    ),
+    el("section", { class: "runs", "aria-label": "Recent eval runs" }, data.runs.map(runCard)),
   );
 }
 
-function stat(label, value) {
-  return el("div", { class: "card stat" }, el("p", { class: "stat-label", text: label }), el("p", { class: "stat-value", text: value }));
+function stat(label, value, iconName, sub = null) {
+  return el("div", { class: "card stat" },
+    el("span", { class: "stat-icon" }, icon(iconName)),
+    el("p", { class: "stat-value", text: value }),
+    el("p", { class: "stat-label", text: label }),
+    sub ? el("p", { class: "stat-sub", text: sub }) : null,
+  );
 }
 
 async function showRun(id) {
@@ -89,7 +108,7 @@ async function showRun(id) {
 
   const back = el("a", { href: "#", class: "btn btn-quiet btn-small", text: "← All runs" });
   const caseRows = results.map((r) =>
-    el("tr", {},
+    el("tr", { class: r.passed ? "case-pass" : "case-fail" },
       td("Case", { class: "mono", text: r.case_id }),
       td("Scorer", { text: r.scorer }),
       td("Result", {}, resultBadge(r.passed)),
@@ -97,7 +116,7 @@ async function showRun(id) {
       td("Latency", { class: "num", text: fmtMs(r.latency_ms) }),
       td("Tokens", { class: "num", text: fmtInt(r.prompt_tokens + r.completion_tokens) }),
       td("Cost", { class: "num", text: fmtUsd(r.cost_usd) }),
-      td("Cache", { class: "mono", text: r.cache_status || "–" }),
+      td("Cache", {}, r.cache_status ? cacheBadge(r.cache_status) : el("span", { class: "muted", text: "–" })),
       td("Notes", {},
         r.error ? el("span", { class: "muted", text: r.error }) : r.reason ? el("span", { text: r.reason }) : null,
         r.output !== null && r.output !== undefined
@@ -110,11 +129,17 @@ async function showRun(id) {
   view.replaceChildren(
     head(`Run #${run.id}`, `${run.dataset} on ${run.model}${run.judge_model ? `, judged by ${run.judge_model}` : ""} · ${fmtDateTime(run.finished_at || run.started_at)}`, back),
     el("section", { class: "stats", "aria-label": "Summary" },
-      stat("Pass rate", `${fmtPct(run.pass_rate)} (${run.passed}/${run.cases})`),
-      stat("Mean score", summary.mean_score.toFixed(3)),
-      stat("Latency p50 / p95", `${fmtMs(summary.p50_ms)} / ${fmtMs(summary.p95_ms)}`),
-      stat("Cost", fmtUsd(Number(summary.cost_usd) + Number(summary.judge_cost_usd))),
-      stat("Errors", fmtInt(summary.errors)),
+      el("div", { class: "card stat summary-hero" },
+        ring(run.pass_rate, true),
+        el("div", {},
+          el("p", { class: "stat-value", text: `${run.passed}/${run.cases}` }),
+          el("p", { class: "stat-label", text: "cases passed" }),
+        ),
+      ),
+      stat("Mean score", summary.mean_score.toFixed(3), "check-circle"),
+      stat("Latency (median)", fmtMs(summary.p50_ms), "clock", `p95 ${fmtMs(summary.p95_ms)}`),
+      stat("Cost", fmtUsd(Number(summary.cost_usd) + Number(summary.judge_cost_usd)), "dollar"),
+      stat("Errors", fmtInt(summary.errors), "alert"),
     ),
     el("section", { class: "card" },
       el("h2", { text: "Cases" }),
