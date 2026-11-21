@@ -158,6 +158,12 @@ def machine_info() -> dict[str, str]:
         "gateway_python": compose(
             "exec", "-T", "gateway", "python", "--version"
         ).strip(),
+        "power": _cmd(["pmset", "-g", "batt"])
+        .splitlines()[0]
+        .replace("Now drawing from ", "")
+        .strip("'")
+        if platform.system() == "Darwin"
+        else "",
         "postgres_image": "postgres:16",
         "redis_image": "redis:7-alpine",
     }

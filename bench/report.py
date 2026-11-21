@@ -75,6 +75,20 @@ def build(results_path: Path, doc: Path = DOC, chart_dir: Path | None = None) ->
 # --- header and setup --------------------------------------------------------------
 
 
+def max_sleep_gap(runs: list[dict[str, Any]]) -> float:
+    gaps: list[float] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if "sleep_gap_s" in node:
+                gaps.append(node["sleep_gap_s"])
+            for value in node.values():
+                walk(value)
+
+    walk(runs)
+    return max(gaps, default=0.0)
+
+
 def header(meta: dict[str, Any], runs: list[dict[str, Any]]) -> str:
     m = meta["machine"]
     setup = table(
@@ -84,9 +98,11 @@ def header(meta: dict[str, Any], runs: list[dict[str, Any]]) -> str:
             ["Docker", f"Docker Desktop {m['docker_server']}, VM with {m['docker_vm_cpus']} CPUs and {m['docker_vm_memory_gib']} GiB; Compose {m['compose']}"],
             ["Gateway", f"{m['gateway_python']}, one Uvicorn worker, the project's Dockerfile and default settings (Postgres pool of 10, JSON logs at INFO)"],
             ["Data stores", f"{m['postgres_image']} and {m['redis_image']} from docker-compose.yml"],
+            ["Power", m.get("power") or "not recorded"],
             ["Client", "Python asyncio + HTTPX in a container on the Compose network (`http://gateway:8000`)"],
             ["Runs", f"{meta['runs']} runs of every scenario, each on a freshly restarted gateway, after {meta['settings']['warmup_requests']} warm-up requests; tables show the median across runs"],
             ["Measured", f"{meta['started_utc']} at commit `{meta['git_commit']}`"],
+            ["Sleep during scenarios", f"largest gap {max_sleep_gap(runs):.1f} s (a gap over 2 s would mean the run is invalid)"],
         ],
         set(),
     )  # fmt: skip
@@ -98,7 +114,7 @@ These numbers come from the gateway running in **Docker Compose on one laptop**,
 
 {setup}
 
-**Method.** Each scenario runs {meta["runs"]} times. The scenarios are interleaved (run 1 of everything, then run 2, ...) so slow drift on the machine does not favour one of them, and the gateway is restarted before each scenario, so breakers, single-flight and in-process metrics start clean. Latency is wall-clock time measured by the client around each request. The gateway's own Prometheus metrics give the server-side numbers and count provider calls, so the gateway's share and the provider's share are separated by measurement, not inference. Costs use the gateway's real price table on simulated token counts (the Mock is free). The Mac was plugged in and kept awake during the run.
+**Method.** Each scenario runs {meta["runs"]} times. The scenarios are interleaved (run 1 of everything, then run 2, ...) so slow drift on the machine does not favour one of them, and the gateway is restarted before each scenario, so breakers, single-flight and in-process metrics start clean. Latency is wall-clock time measured by the client around each request. The gateway's own Prometheus metrics give the server-side numbers and count provider calls, so the gateway's share and the provider's share are separated by measurement, not inference. Costs use the gateway's real price table on simulated token counts (the Mock is free). The runner keeps macOS awake and records, for every scenario, whether the machine slept during it (wall clock against `perf_counter`); the largest gap in this run is shown in the setup table.
 
 **Benchmark-only routes.** With `GATEWAY_BENCH_MODE=true` (only in `bench/docker-compose.bench.yml`) the gateway adds three Mock targets: one that waits a fixed 50 ms, one that always fails with a server error, and one that waits 200 ms and reports 500 + 200 tokens of `gpt-4.1-mini`, so cache savings have a dollar value. Routes: `bench-delay-50`, `bench-fallback` (failing primary, then the healthy `mock-1`) and `bench-priced`."""
 
