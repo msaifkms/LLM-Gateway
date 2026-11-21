@@ -367,3 +367,10 @@ def test_motion_respects_reduced_motion() -> None:
     assert "@media (prefers-reduced-motion: reduce)" in css
     # Animations are only switched on when motion is welcome.
     assert "@media (prefers-reduced-motion: no-preference)" in css
+
+
+def test_the_hidden_attribute_always_hides() -> None:
+    """Buttons set display: inline-flex, which would otherwise beat [hidden]."""
+    css = (STATIC_DIR / "css" / "app.css").read_text()
+
+    assert "[hidden] { display: none !important; }" in css

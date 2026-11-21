@@ -120,6 +120,9 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 
+/* `hidden` always wins, even over components that set their own display. */
+[hidden] { display: none !important; }
+
 html { -webkit-text-size-adjust: 100%; }
 
 body {
