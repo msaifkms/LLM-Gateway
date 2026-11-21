@@ -68,6 +68,9 @@ def build(results_path: Path, doc: Path = DOC, chart_dir: Path | None = None) ->
         sections.append(resilience_section(runs))
     if "rate_limit" in runs[0]:
         sections.append(rate_limit_section(meta, runs))
+    real = Path(results_path).with_name("real_sample.json")
+    if real.exists():
+        sections.append(real_sample_section(json.loads(real.read_text()), runs))
     sections.append(reproduce_section())
     doc.write_text("\n\n".join(sections).rstrip() + "\n")
 
@@ -79,7 +82,10 @@ def max_sleep_gap(runs: list[dict[str, Any]]) -> float:
     gaps: list[float] = []
 
     def walk(node: Any) -> None:
-        if isinstance(node, dict):
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+        elif isinstance(node, dict):
             if "sleep_gap_s" in node:
                 gaps.append(node["sleep_gap_s"])
             for value in node.values():
@@ -98,11 +104,11 @@ def header(meta: dict[str, Any], runs: list[dict[str, Any]]) -> str:
             ["Docker", f"Docker Desktop {m['docker_server']}, VM with {m['docker_vm_cpus']} CPUs and {m['docker_vm_memory_gib']} GiB; Compose {m['compose']}"],
             ["Gateway", f"{m['gateway_python']}, one Uvicorn worker, the project's Dockerfile and default settings (Postgres pool of 10, JSON logs at INFO)"],
             ["Data stores", f"{m['postgres_image']} and {m['redis_image']} from docker-compose.yml"],
-            ["Power", m.get("power") or "not recorded"],
+            ["Power", "on battery (not plugged in)" if "Battery" in (m.get("power") or "") else (m.get("power") or "not recorded")],
             ["Client", "Python asyncio + HTTPX in a container on the Compose network (`http://gateway:8000`)"],
             ["Runs", f"{meta['runs']} runs of every scenario, each on a freshly restarted gateway, after {meta['settings']['warmup_requests']} warm-up requests; tables show the median across runs"],
             ["Measured", f"{meta['started_utc']} at commit `{meta['git_commit']}`"],
-            ["Sleep during scenarios", f"largest gap {max_sleep_gap(runs):.1f} s (a gap over 2 s would mean the run is invalid)"],
+            ["Sleep during scenarios", f"none: the largest gap between wall clock and perf_counter in any scenario was {max(0.0, max_sleep_gap(runs)):.1f} s (over 2 s would invalidate the run)"],
         ],
         set(),
     )  # fmt: skip
@@ -143,13 +149,20 @@ def network_section(runs: list[dict[str, Any]]) -> str:
         rows,
         {1, 2, 3, 4, 5, 6},
     )  # fmt: skip
+
+    def m(where: str, level: str, key: str) -> float:
+        return med([x[key] for x in pick(runs, "network", where, "healthz", level)])
+
+    p50_ratio = m("host", "1", "p50_ms") / m("in_network", "1", "p50_ms")
+    rps_drop = 1 - m("host", "50", "rps") / m("in_network", "50", "rps")
+    p99_rise = m("host", "50", "p99_ms") / m("in_network", "50", "p99_ms") - 1
     return f"""## Why the client runs inside Docker
 
-`GET /healthz` touches no database and no Redis, so it measures the HTTP path alone. Sent from the Mac through Docker Desktop's published port, it is slower and its tail is much longer than the same requests sent from a container on the Compose network:
+`GET /healthz` touches no database and no Redis, so it measures the HTTP path alone. Sent from the Mac through Docker Desktop's published port, it is slower than the same requests sent from a container on the Compose network:
 
 {t}
 
-The port forwarding between macOS and the Docker VM is not part of the gateway, so every scenario below runs its client inside the Compose network. Load at 10 and 50 concurrent requests is split across 5 client processes, because a single Python client process was measured to top out at about 1,100–1,500 requests per second on its own."""
+One at a time, the median through the published port was {p50_ratio:.1f}× the in-network median; at 50 concurrent requests, throughput was {rps_drop:.0%} lower and p99 {p99_rise:.0%} higher. That port forwarding between macOS and the Docker VM is not part of the gateway, so every scenario below runs its client inside the Compose network. Load at 10 and 50 concurrent requests is split across 5 client processes, because in trial runs a single Python client process became the bottleneck before the gateway did."""
 
 
 # --- 1. overhead -------------------------------------------------------------------
@@ -261,7 +274,7 @@ Every request goes through the whole pipeline, exactly like real traffic: the AP
 
 {t}
 
-**Added latency, isolated.** With a provider that takes a fixed 50 ms, everything above 50 ms is the gateway plus the HTTP hop:
+**Added latency, isolated.** With a provider that takes a fixed 50 ms, everything above 50 ms is the gateway, the HTTP hop, and any overrun of the Mock's own sleep (last column):
 
 {added}
 
@@ -429,14 +442,17 @@ def rate_limit_section(meta: dict[str, Any], runs: list[dict[str, Any]]) -> str:
         ["Requests offered", f"{rl[0]['offered']:,} ({rl[0]['offered_rps']:.0f}/s for 60 s)"],
         ["Allowed", f"{med([x['allowed'] for x in rl]):.0f} ({rng([x['allowed'] for x in rl], '{:.0f}')})"],
         ["Expected from the bucket (limit + limit/60 × seconds)", f"{med([x['expected_allowed'] for x in rl]):.1f}"],
-        ["Allowed in the first second (the full bucket)", f"{med([x['allowed_first_second'] for x in rl]):.0f}"],
+        ["Allowed in the first 3 s (the full bucket of " + str(limit) + ", plus refill)", f"{med([sum(x['allowed_per_second'][:3]) for x in rl]):.0f}"],
         ["Sustained rate after the first 10 s", f"{med([x['sustained_per_min'] for x in rl]):.1f} per minute (limit {limit})"],
         ["Refused with 429", f"{med([x['refused_429'] for x in rl]):,.0f}, all with `Retry-After`" if all(x["refusals_with_retry_after"] == x["refused_429"] for x in rl) else f"{med([x['refused_429'] for x in rl]):,.0f}"],
         ["Other statuses", str(sum(x["other_status"] for x in rl))],
     ]  # fmt: skip
     t = table([f"Limit {limit} per minute", "Median of runs (range)"], rows, {1})
     charts.rate_limit_timeline(
-        CHART_DIR / "rate_limit.svg", rl[0]["allowed_per_second"], limit
+        CHART_DIR / "rate_limit.svg",
+        rl[0]["allowed_per_second"],
+        limit,
+        rl[0]["offered_rps"],
     )
     allowed = med([x["allowed"] for x in rl])
     expected = med([x["expected_allowed"] for x in rl])
@@ -450,6 +466,41 @@ A user with a limit of {limit} requests per minute is sent {rl[0]["offered_rps"]
 ![Allowed requests over time](benchmarks/rate_limit.svg)
 
 **What this shows.** The limiter allowed {allowed:.0f} requests where the bucket's formula gives {expected:.1f}: the initial burst equal to the limit, then a steady {sustained:.1f} per minute, which matches the configured {limit}. Requests were sent at 50 per second from many concurrent tasks, and the atomic Lua script never let more through than the bucket held. So "{limit} per minute" means a burst of up to {limit}, then {limit} per minute, not a hard cap of {limit} in any 60-second window."""
+
+
+def real_sample_section(real: dict[str, Any], runs: list[dict[str, Any]]) -> str:
+    rows = []
+    for r in real["results"]:
+        ok = r["statuses"].get("200", r["statuses"].get(200, 0))
+        rows.append(
+            [
+                f"`{r['route']}` ({', '.join(r['models'])})",
+                f"{ok} of {real['requests_per_route']}",
+                ms(r["p50_ms"]) if "p50_ms" in r else "–",
+                ms(r["p95_ms"]) if "p95_ms" in r else "–",
+                ms(r["provider_mean_ms"]),
+                ms(r["gateway_own_mean_ms"]),
+                f"${Decimal(r['cost_usd']):.6f}",
+            ]
+        )
+    t = table(
+        ["Route (model)", "Succeeded", "p50", "p95", "Provider call (mean)", "Gateway's own time (mean)", "Cost"],
+        rows,
+        {1, 2, 3, 4, 5, 6},
+    )  # fmt: skip
+    shares = [
+        r["gateway_own_mean_ms"] / (r["provider_mean_ms"] + r["gateway_own_mean_ms"])
+        for r in real["results"]
+        if r["provider_mean_ms"] == r["provider_mean_ms"]  # skip NaN
+    ]
+    share = f"{min(shares):.1%}–{max(shares):.1%}" if shares else "n/a"
+    return f"""## Real providers, for scale
+
+A small sample against the real APIs, through the same gateway on the same laptop, over the public internet: {real["requests_per_route"]} uncached requests per route, one at a time, a short prompt, at most 40 output tokens. Measured {real["measured_utc"]}; the whole sample cost ${Decimal(real["total_cost_usd"]):.6f}. Raw data: [benchmarks/real_sample.json](benchmarks/real_sample.json).
+
+{t}
+
+**What this shows.** A real model call took hundreds of milliseconds, and the gateway's own time was {share} of each request. That is why a few milliseconds of gateway overhead (section 1) does not matter much in practice. {real["requests_per_route"]} requests per route is a small sample, from one place at one time: it shows the scale, it does not rank the providers."""
 
 
 def reproduce_section() -> str:

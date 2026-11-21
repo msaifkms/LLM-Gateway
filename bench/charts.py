@@ -139,7 +139,10 @@ def resilience_timeline(
 
 
 def rate_limit_timeline(
-    path: Path, allowed_per_second: Sequence[int], limit_per_min: int
+    path: Path,
+    allowed_per_second: Sequence[int],
+    limit_per_min: int,
+    offered_rps: float,
 ) -> None:
     """Cumulative allowed requests against what the token bucket should allow."""
     fig, ax = plt.subplots(figsize=(7, 3.4))
@@ -150,14 +153,16 @@ def rate_limit_timeline(
         cumulative.append(total)
     seconds = list(range(1, len(cumulative) + 1))
     rate = limit_per_min / 60
-    expected = [limit_per_min + rate * t for t in seconds]
+    # Requests can only be allowed as fast as they are offered: the full bucket
+    # drains at the offered rate, then refill sets the pace.
+    expected = [min(offered_rps * t, limit_per_min + rate * t) for t in seconds]
     ax.plot(
         seconds,
         expected,
         color=SERIES[1],
         linewidth=2,
         linestyle="--",
-        label=f"expected: {limit_per_min} at once, then {rate:g}/s",
+        label=f"expected: bucket of {limit_per_min} at the offered rate, then {rate:g}/s",
     )
     ax.step(
         seconds,
@@ -169,6 +174,6 @@ def rate_limit_timeline(
     )
     ax.set_xlabel("seconds since the first request")
     ax.set_ylabel("requests allowed so far")
-    ax.set_title(f"Rate limit {limit_per_min}/min under 50 requests/s")
+    ax.set_title(f"Rate limit {limit_per_min}/min under {offered_rps:g} requests/s")
     ax.legend(loc="lower right")
     _save(fig, path)
